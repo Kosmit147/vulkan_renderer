@@ -67,5 +67,6 @@ main :: proc() {
 
 	for !glfw.WindowShouldClose(window) {
 		glfw.PollEvents()
+		free_all(context.temp_allocator)
 	}
 }

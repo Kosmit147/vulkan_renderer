@@ -3,6 +3,8 @@ package vulkan_renderer
 import vk "vendor:vulkan"
 import "vendor:glfw"
 
+import "core:log"
+
 Renderer :: struct {
 	instance: vk.Instance,
 }
@@ -33,6 +35,15 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 	defer if !ok do vk.DestroyInstance(renderer.instance, nil)
 
 	vk.load_proc_addresses_instance(renderer.instance)
+
+	extension_count: u32
+	vk.EnumerateInstanceExtensionProperties(nil, &extension_count, nil)
+	extensions := make([dynamic]vk.ExtensionProperties, extension_count)
+	defer delete(extensions)
+	vk.EnumerateInstanceExtensionProperties(nil, &extension_count, raw_data(extensions))
+
+	log.infof("Supported extensions:")
+	for &extension in extensions do log.infof("\t%v", cast(cstring)raw_data(&extension.extensionName))
 
 	ok = true
 	return
