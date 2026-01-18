@@ -9,7 +9,10 @@ Renderer :: struct {
 	instance: vk.Instance,
 	debug_utils_messenger: vk.DebugUtilsMessengerEXT,
 	physical_device: vk.PhysicalDevice,
-	graphics_queue_family_index: int
+	device: vk.Device,
+
+	graphics_queue_family_index: u32,
+	graphics_queue: vk.Queue,
 }
 
 init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := false) {
@@ -109,18 +112,44 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 	graphics_queue_family_index_found := false
 	for &queue_family, index in queue_families {
 		if .GRAPHICS in queue_family.queueFlags {
-			renderer.graphics_queue_family_index = index
+			renderer.graphics_queue_family_index = u32(index)
 			graphics_queue_family_index_found = true
 			break
 		}
 	}
 	if !graphics_queue_family_index_found do return
 
+	queue_priorities := [?]f32{ 1 }
+	device_queue_create_info := vk.DeviceQueueCreateInfo {
+		sType = .DEVICE_QUEUE_CREATE_INFO,
+		queueFamilyIndex = renderer.graphics_queue_family_index,
+		queueCount = 1,
+		pQueuePriorities = raw_data(&queue_priorities),
+	}
+
+	physical_device_features := vk.PhysicalDeviceFeatures{}
+	
+	device_create_info := vk.DeviceCreateInfo {
+		sType = .DEVICE_CREATE_INFO,
+		pQueueCreateInfos = &device_queue_create_info,
+		queueCreateInfoCount = 1,
+		pEnabledFeatures = &physical_device_features,
+		enabledLayerCount = cast(u32)len(wanted_layers),
+		ppEnabledLayerNames = raw_data(wanted_layers),
+		enabledExtensionCount = 0,
+		ppEnabledExtensionNames = nil,
+	}
+
+	if vk.CreateDevice(renderer.physical_device, &device_create_info, nil, &renderer.device) != .SUCCESS do return
+	defer if !ok do vk.DestroyDevice(renderer.device, nil)
+	vk.GetDeviceQueue(renderer.device, renderer.graphics_queue_family_index, 0, &renderer.graphics_queue)
+
 	ok = true
 	return
 }
 
 deinit_renderer :: proc(renderer: ^Renderer) {
+	vk.DestroyDevice(renderer.device, nil)
 	when ODIN_DEBUG { vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil) }
 	vk.DestroyInstance(renderer.instance, nil)
 }
