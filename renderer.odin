@@ -28,8 +28,10 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 	wanted_extensions := get_vulkan_extensions()
 	defer delete(wanted_extensions)
 
+	instance_debug_messenger_create_info := get_vk_debug_messenger_create_info()
 	instance_create_info := vk.InstanceCreateInfo {
 		sType = .INSTANCE_CREATE_INFO,
+		pNext = &instance_debug_messenger_create_info,
 		pApplicationInfo = &application_info,
 		enabledLayerCount = cast(u32)len(wanted_layers),
 		ppEnabledLayerNames = raw_data(wanted_layers),
@@ -66,13 +68,7 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 	}
 
 	when ODIN_DEBUG {
-		debug_utils_messenger_create_info := vk.DebugUtilsMessengerCreateInfoEXT {
-			sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-			messageSeverity = { .VERBOSE, /* .INFO, */ .WARNING, .ERROR },
-			messageType = { .GENERAL, .VALIDATION, .PERFORMANCE },
-			pfnUserCallback = vk_debug_utils_messenger_callback,
-		}
-
+		debug_utils_messenger_create_info := get_vk_debug_messenger_create_info()
 		if vk.CreateDebugUtilsMessengerEXT(renderer.instance,
 						   &debug_utils_messenger_create_info,
 						   nil,
@@ -103,6 +99,16 @@ get_vulkan_extensions :: proc() -> [dynamic]cstring {
 	append(&extensions, ..glfw_required_extensions[:])
 	when ODIN_DEBUG { append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME) }
 	return extensions
+}
+
+@(private="file")
+get_vk_debug_messenger_create_info :: proc() -> vk.DebugUtilsMessengerCreateInfoEXT {
+	return vk.DebugUtilsMessengerCreateInfoEXT {
+		sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+		messageSeverity = { .VERBOSE, .INFO, .WARNING, .ERROR },
+		messageType = { .GENERAL, .VALIDATION, .PERFORMANCE },
+		pfnUserCallback = vk_debug_utils_messenger_callback,
+	}
 }
 
 @(private="file")
