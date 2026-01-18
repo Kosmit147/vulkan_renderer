@@ -62,7 +62,7 @@ main :: proc() {
 	glfw.SetKeyCallback(window, glfw_key_callback)
 
 	renderer: Renderer
-	if !init_renderer(&renderer, "Renderer") do log.panic("Failed to initialize the renderer!")
+	if !init_renderer(&renderer, "Renderer", window) do log.panic("Failed to initialize the renderer!")
 	defer deinit_renderer(&renderer)
 
 	for !glfw.WindowShouldClose(window) {

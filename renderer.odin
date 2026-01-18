@@ -8,14 +8,21 @@ import "core:log"
 Renderer :: struct {
 	instance: vk.Instance,
 	debug_utils_messenger: vk.DebugUtilsMessengerEXT,
+
 	physical_device: vk.PhysicalDevice,
 	device: vk.Device,
 
 	graphics_queue_family_index: u32,
 	graphics_queue: vk.Queue,
+	presentation_queue_family_index: u32,
+	presentation_queue: vk.Queue,
+
+	surface: vk.SurfaceKHR,
 }
 
-init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := false) {
+init_renderer :: proc(renderer: ^Renderer,
+		      application_name: cstring,
+		      glfw_window_handle: glfw.WindowHandle) -> (ok := false) {
 	vk.load_proc_addresses_global(rawptr(glfw.GetInstanceProcAddress))
 	assert(vk.CreateInstance != nil, "Vulkan function pointers not loaded")
 
@@ -78,8 +85,11 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 						   &debug_utils_messenger_create_info,
 						   nil,
 						   &renderer.debug_utils_messenger) != .SUCCESS { return }
-		defer if !ok { vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil) }
+		defer if !ok do vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil)
 	}
+
+	if glfw.CreateWindowSurface(renderer.instance, glfw_window_handle, nil, &renderer.surface) != .SUCCESS do return
+	defer if !ok do vk.DestroySurfaceKHR(renderer.instance, renderer.surface, nil)
 
 	physical_device_count: u32
 	vk.EnumeratePhysicalDevices(renderer.instance, &physical_device_count, nil)
@@ -109,30 +119,54 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 	defer delete(queue_families)
 	vk.GetPhysicalDeviceQueueFamilyProperties(renderer.physical_device, &queue_family_count, raw_data(queue_families))
 
-	graphics_queue_family_index_found := false
-	for &queue_family, index in queue_families {
+	graphics_queue_family_index_found, presentation_queue_family_index_found := false, false
+	for &queue_family, queue_index in queue_families {
 		if .GRAPHICS in queue_family.queueFlags {
-			renderer.graphics_queue_family_index = u32(index)
+			renderer.graphics_queue_family_index = u32(queue_index)
 			graphics_queue_family_index_found = true
-			break
 		}
+
+		presentation_support: b32
+		vk.GetPhysicalDeviceSurfaceSupportKHR(renderer.physical_device,
+						      u32(queue_index),
+						      renderer.surface,
+						      &presentation_support)
+
+		if presentation_support {
+			renderer.presentation_queue_family_index = u32(queue_index)
+			presentation_queue_family_index_found = true
+		}
+
+		if graphics_queue_family_index_found && presentation_queue_family_index_found do break
 	}
-	if !graphics_queue_family_index_found do return
+	if !graphics_queue_family_index_found || !presentation_queue_family_index_found do return
+
+	queue_create_infos := make([dynamic]vk.DeviceQueueCreateInfo, 0, 2)
+	defer delete(queue_create_infos)
 
 	queue_priorities := [?]f32{ 1 }
-	device_queue_create_info := vk.DeviceQueueCreateInfo {
+	append(&queue_create_infos, vk.DeviceQueueCreateInfo {
 		sType = .DEVICE_QUEUE_CREATE_INFO,
 		queueFamilyIndex = renderer.graphics_queue_family_index,
 		queueCount = 1,
 		pQueuePriorities = raw_data(&queue_priorities),
+	})
+
+	if renderer.graphics_queue_family_index != renderer.presentation_queue_family_index {
+		append(&queue_create_infos, vk.DeviceQueueCreateInfo {
+			sType = .DEVICE_QUEUE_CREATE_INFO,
+			queueFamilyIndex = renderer.presentation_queue_family_index,
+			queueCount = 1,
+			pQueuePriorities = raw_data(&queue_priorities),
+		})
 	}
 
 	physical_device_features := vk.PhysicalDeviceFeatures{}
 	
 	device_create_info := vk.DeviceCreateInfo {
 		sType = .DEVICE_CREATE_INFO,
-		pQueueCreateInfos = &device_queue_create_info,
-		queueCreateInfoCount = 1,
+		pQueueCreateInfos = raw_data(queue_create_infos),
+		queueCreateInfoCount = cast(u32)len(queue_create_infos),
 		pEnabledFeatures = &physical_device_features,
 		enabledLayerCount = cast(u32)len(wanted_layers),
 		ppEnabledLayerNames = raw_data(wanted_layers),
@@ -143,6 +177,7 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 	if vk.CreateDevice(renderer.physical_device, &device_create_info, nil, &renderer.device) != .SUCCESS do return
 	defer if !ok do vk.DestroyDevice(renderer.device, nil)
 	vk.GetDeviceQueue(renderer.device, renderer.graphics_queue_family_index, 0, &renderer.graphics_queue)
+	vk.GetDeviceQueue(renderer.device, renderer.presentation_queue_family_index, 0, &renderer.presentation_queue)
 
 	ok = true
 	return
@@ -150,6 +185,7 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 
 deinit_renderer :: proc(renderer: ^Renderer) {
 	vk.DestroyDevice(renderer.device, nil)
+	vk.DestroySurfaceKHR(renderer.instance, renderer.surface, nil)
 	when ODIN_DEBUG { vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil) }
 	vk.DestroyInstance(renderer.instance, nil)
 }
