@@ -102,7 +102,7 @@ init_renderer :: proc(renderer: ^Renderer,
 
 	suitable_physical_device_found := false
 	for &device in physical_devices {
-		if is_suitable_physical_device(device, wanted_device_extensions[:]) {
+		if is_suitable_physical_device(device, wanted_device_extensions[:], renderer.surface) {
 			renderer.physical_device = device
 			suitable_physical_device_found = true
 			break
@@ -212,11 +212,11 @@ get_vulkan_device_extensions :: proc() -> [dynamic]cstring {
 
 @(private="file")
 is_suitable_physical_device :: proc(physical_device: vk.PhysicalDevice,
-				    required_device_extensions: []cstring) -> (ok := false) {
+				    required_device_extensions: []cstring,
+				    surface: vk.SurfaceKHR) -> (ok := false) {
 	device_properties: vk.PhysicalDeviceProperties
 	vk.GetPhysicalDeviceProperties(physical_device, &device_properties)
-	device_features: vk.PhysicalDeviceFeatures
-	vk.GetPhysicalDeviceFeatures(physical_device, &device_features)
+	if device_properties.deviceType != .DISCRETE_GPU do return
 
 	device_extension_count: u32
 	vk.EnumerateDeviceExtensionProperties(physical_device, nil, &device_extension_count, nil)
@@ -237,7 +237,34 @@ is_suitable_physical_device :: proc(physical_device: vk.PhysicalDevice,
 		if !required_extension_found do return
 	}
 
-	if device_properties.deviceType != .DISCRETE_GPU do return
+	surface_capabilities: vk.SurfaceCapabilitiesKHR
+	vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_capabilities)
+
+	surface_format_count: u32
+	vk.GetPhysicalDeviceSurfaceFormatsKHR(physical_device,
+					      surface,
+					      &surface_format_count,
+					      nil)
+	surface_formats := make([dynamic]vk.SurfaceFormatKHR, surface_format_count)
+	defer delete(surface_formats)
+	vk.GetPhysicalDeviceSurfaceFormatsKHR(physical_device,
+					      surface,
+					      &surface_format_count,
+					      raw_data(surface_formats))
+
+	presentation_mode_count: u32
+	vk.GetPhysicalDeviceSurfacePresentModesKHR(physical_device,
+						   surface,
+						   &presentation_mode_count,
+						   nil)
+	presentation_modes := make([dynamic]vk.PresentModeKHR, presentation_mode_count)
+	defer delete(presentation_modes)
+	vk.GetPhysicalDeviceSurfacePresentModesKHR(physical_device,
+						   surface,
+						   &presentation_mode_count,
+						   raw_data(presentation_modes))
+
+	if len(surface_formats) == 0 || len(presentation_modes) == 0 do return
 
 	ok = true
 	return
