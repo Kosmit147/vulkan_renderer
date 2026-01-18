@@ -18,6 +18,17 @@ Renderer :: struct {
 	presentation_queue: vk.Queue,
 
 	surface: vk.SurfaceKHR,
+	swap_chain: vk.SwapchainKHR,
+	swap_chain_images: [dynamic]vk.Image,
+	swap_chain_image_format: vk.Format,
+	swap_chain_extent: vk.Extent2D,
+}
+
+Swap_Chain_Creation_Properties :: struct {
+	surface_capabilities: vk.SurfaceCapabilitiesKHR,
+	surface_format: vk.SurfaceFormatKHR,
+	presentation_mode: vk.PresentModeKHR,
+	extent: vk.Extent2D,
 }
 
 init_renderer :: proc(renderer: ^Renderer,
@@ -100,9 +111,15 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer delete(physical_devices)
 	vk.EnumeratePhysicalDevices(renderer.instance, &physical_device_count, raw_data(physical_devices))
 
+	swap_chain_creation_properties: Swap_Chain_Creation_Properties
 	suitable_physical_device_found := false
 	for &device in physical_devices {
-		if is_suitable_physical_device(device, wanted_device_extensions[:], renderer.surface) {
+		device_suitable := false
+		swap_chain_creation_properties, device_suitable = try_physical_device(device,
+										      wanted_device_extensions[:],
+										      glfw_window_handle,
+										      renderer.surface)
+		if device_suitable {
 			renderer.physical_device = device
 			suitable_physical_device_found = true
 			break
@@ -176,11 +193,58 @@ init_renderer :: proc(renderer: ^Renderer,
 	vk.GetDeviceQueue(renderer.device, renderer.graphics_queue_family_index, 0, &renderer.graphics_queue)
 	vk.GetDeviceQueue(renderer.device, renderer.presentation_queue_family_index, 0, &renderer.presentation_queue)
 
+	swap_chain_min_image_count := swap_chain_creation_properties.surface_capabilities.minImageCount
+	swap_chain_max_image_count := swap_chain_creation_properties.surface_capabilities.maxImageCount
+	wanted_swap_chain_image_count := swap_chain_min_image_count + 1
+	if swap_chain_max_image_count != 0 {
+		wanted_swap_chain_image_count = min(wanted_swap_chain_image_count, swap_chain_max_image_count)
+	}
+
+	queue_family_indices := [2]u32{
+		renderer.graphics_queue_family_index,
+		renderer.presentation_queue_family_index
+	}
+
+	swap_chain_image_sharing_mode: vk.SharingMode =
+		.CONCURRENT if renderer.graphics_queue_family_index != renderer.presentation_queue_family_index else .EXCLUSIVE
+
+	swap_chain_create_info := vk.SwapchainCreateInfoKHR {
+		sType = .SWAPCHAIN_CREATE_INFO_KHR,
+		surface = renderer.surface,
+		minImageCount = wanted_swap_chain_image_count,
+		imageFormat = swap_chain_creation_properties.surface_format.format,
+		imageColorSpace = swap_chain_creation_properties.surface_format.colorSpace,
+		imageExtent = swap_chain_creation_properties.extent,
+		imageArrayLayers = 1,
+		imageUsage = { .COLOR_ATTACHMENT },
+		imageSharingMode = swap_chain_image_sharing_mode,
+		queueFamilyIndexCount = len(queue_family_indices),
+		pQueueFamilyIndices = raw_data(&queue_family_indices),
+		preTransform = swap_chain_creation_properties.surface_capabilities.currentTransform,
+		compositeAlpha = { .OPAQUE },
+		presentMode = swap_chain_creation_properties.presentation_mode,
+		clipped = true,
+	}
+	
+	if vk.CreateSwapchainKHR(renderer.device, &swap_chain_create_info, nil, &renderer.swap_chain) != .SUCCESS do return
+	defer if !ok do vk.DestroySwapchainKHR(renderer.device, renderer.swap_chain, nil)
+
+	swap_chain_image_count: u32
+	vk.GetSwapchainImagesKHR(renderer.device, renderer.swap_chain, &swap_chain_image_count, nil)
+	renderer.swap_chain_images = make([dynamic]vk.Image, swap_chain_image_count)
+	vk.GetSwapchainImagesKHR(renderer.device, renderer.swap_chain, &swap_chain_image_count, raw_data(renderer.swap_chain_images))
+	defer if !ok do delete(renderer.swap_chain_images)
+
+	renderer.swap_chain_image_format = swap_chain_creation_properties.surface_format.format
+	renderer.swap_chain_extent = swap_chain_creation_properties.extent
+
 	ok = true
 	return
 }
 
 deinit_renderer :: proc(renderer: ^Renderer) {
+	delete(renderer.swap_chain_images)
+	vk.DestroySwapchainKHR(renderer.device, renderer.swap_chain, nil)
 	vk.DestroyDevice(renderer.device, nil)
 	vk.DestroySurfaceKHR(renderer.instance, renderer.surface, nil)
 	when ODIN_DEBUG { vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil) }
@@ -211,9 +275,10 @@ get_vulkan_device_extensions :: proc() -> [dynamic]cstring {
 }
 
 @(private="file")
-is_suitable_physical_device :: proc(physical_device: vk.PhysicalDevice,
-				    required_device_extensions: []cstring,
-				    surface: vk.SurfaceKHR) -> (ok := false) {
+try_physical_device :: proc(physical_device: vk.PhysicalDevice,
+			    required_device_extensions: []cstring,
+			    window: glfw.WindowHandle,
+			    surface: vk.SurfaceKHR) -> (swap_chain_properties: Swap_Chain_Creation_Properties, ok := false) {
 	device_properties: vk.PhysicalDeviceProperties
 	vk.GetPhysicalDeviceProperties(physical_device, &device_properties)
 	if device_properties.deviceType != .DISCRETE_GPU do return
@@ -237,8 +302,7 @@ is_suitable_physical_device :: proc(physical_device: vk.PhysicalDevice,
 		if !required_extension_found do return
 	}
 
-	surface_capabilities: vk.SurfaceCapabilitiesKHR
-	vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_capabilities)
+	vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &swap_chain_properties.surface_capabilities)
 
 	surface_format_count: u32
 	vk.GetPhysicalDeviceSurfaceFormatsKHR(physical_device,
@@ -265,6 +329,36 @@ is_suitable_physical_device :: proc(physical_device: vk.PhysicalDevice,
 						   raw_data(presentation_modes))
 
 	if len(surface_formats) == 0 || len(presentation_modes) == 0 do return
+
+	swap_chain_properties.surface_format = surface_formats[0]
+	for &format in surface_formats {
+		if format.format == .B8G8R8A8_SRGB && format.colorSpace == .SRGB_NONLINEAR {
+			swap_chain_properties.surface_format = format
+			break
+		}
+	}
+
+	swap_chain_properties.presentation_mode = .FIFO // FIFO is guaranteed to be available.
+	for presentation_mode in presentation_modes {
+		if presentation_mode == .MAILBOX {
+			swap_chain_properties.presentation_mode = presentation_mode
+			break
+		}
+	}
+
+	swap_chain_properties.extent = swap_chain_properties.surface_capabilities.currentExtent
+	if swap_chain_properties.surface_capabilities.currentExtent.width == max(u32) {
+		// When the swap chain resolution can differ from the window's resolution, the values of currentExtent
+		// are set to max(u32). We have to pick the resolution ourselves.
+		width, height := glfw.GetFramebufferSize(window)
+		swap_chain_properties.extent = vk.Extent2D { u32(width), u32(height) }
+		swap_chain_properties.extent.width = clamp(swap_chain_properties.extent.width,
+							   swap_chain_properties.surface_capabilities.minImageExtent.width,
+							   swap_chain_properties.surface_capabilities.maxImageExtent.width)
+		swap_chain_properties.extent.height = clamp(swap_chain_properties.extent.height,
+							    swap_chain_properties.surface_capabilities.minImageExtent.height,
+							    swap_chain_properties.surface_capabilities.maxImageExtent.height)
+	}
 
 	ok = true
 	return
