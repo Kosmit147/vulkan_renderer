@@ -8,6 +8,8 @@ import "core:log"
 Renderer :: struct {
 	instance: vk.Instance,
 	debug_utils_messenger: vk.DebugUtilsMessengerEXT,
+	physical_device: vk.PhysicalDevice,
+	graphics_queue_family_index: int
 }
 
 init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := false) {
@@ -76,6 +78,44 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 		defer if !ok { vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil) }
 	}
 
+	physical_device_count: u32
+	vk.EnumeratePhysicalDevices(renderer.instance, &physical_device_count, nil)
+	if physical_device_count == 0 do return
+	physical_devices := make([dynamic]vk.PhysicalDevice, physical_device_count)
+	defer delete(physical_devices)
+	vk.EnumeratePhysicalDevices(renderer.instance, &physical_device_count, raw_data(physical_devices))
+
+	suitable_physical_device_found := false
+	for &device in physical_devices {
+		device_properties: vk.PhysicalDeviceProperties
+		device_features: vk.PhysicalDeviceFeatures
+		vk.GetPhysicalDeviceProperties(device, &device_properties)
+		vk.GetPhysicalDeviceFeatures(device, &device_features)
+
+		if device_properties.deviceType == .DISCRETE_GPU {
+			renderer.physical_device = device
+			suitable_physical_device_found = true
+			break
+		}
+	}
+	if !suitable_physical_device_found do return
+
+	queue_family_count: u32
+	vk.GetPhysicalDeviceQueueFamilyProperties(renderer.physical_device, &queue_family_count, nil)
+	queue_families := make([dynamic]vk.QueueFamilyProperties, queue_family_count)
+	defer delete(queue_families)
+	vk.GetPhysicalDeviceQueueFamilyProperties(renderer.physical_device, &queue_family_count, raw_data(queue_families))
+
+	graphics_queue_family_index_found := false
+	for &queue_family, index in queue_families {
+		if .GRAPHICS in queue_family.queueFlags {
+			renderer.graphics_queue_family_index = index
+			graphics_queue_family_index_found = true
+			break
+		}
+	}
+	if !graphics_queue_family_index_found do return
+
 	ok = true
 	return
 }
@@ -105,7 +145,7 @@ get_vulkan_extensions :: proc() -> [dynamic]cstring {
 get_vk_debug_messenger_create_info :: proc() -> vk.DebugUtilsMessengerCreateInfoEXT {
 	return vk.DebugUtilsMessengerCreateInfoEXT {
 		sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-		messageSeverity = { .VERBOSE, .INFO, .WARNING, .ERROR },
+		messageSeverity = { .VERBOSE, /* .INFO, */ .WARNING, .ERROR },
 		messageType = { .GENERAL, .VALIDATION, .PERFORMANCE },
 		pfnUserCallback = vk_debug_utils_messenger_callback,
 	}
