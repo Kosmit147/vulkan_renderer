@@ -7,6 +7,7 @@ import "core:log"
 
 Renderer :: struct {
 	instance: vk.Instance,
+	debug_utils_messenger: vk.DebugUtilsMessengerEXT,
 }
 
 init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := false) {
@@ -38,7 +39,6 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 
 	if vk.CreateInstance(&instance_create_info, nil, &renderer.instance) != .SUCCESS do return
 	defer if !ok do vk.DestroyInstance(renderer.instance, nil)
-
 	vk.load_proc_addresses_instance(renderer.instance)
 
 	{
@@ -65,11 +65,27 @@ init_renderer :: proc(renderer: ^Renderer, application_name: cstring) -> (ok := 
 		log.info()
 	}
 
+	when ODIN_DEBUG {
+		debug_utils_messenger_create_info := vk.DebugUtilsMessengerCreateInfoEXT {
+			sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+			messageSeverity = { .VERBOSE, /* .INFO, */ .WARNING, .ERROR },
+			messageType = { .GENERAL, .VALIDATION, .PERFORMANCE },
+			pfnUserCallback = vk_debug_utils_messenger_callback,
+		}
+
+		if vk.CreateDebugUtilsMessengerEXT(renderer.instance,
+						   &debug_utils_messenger_create_info,
+						   nil,
+						   &renderer.debug_utils_messenger) != .SUCCESS { return }
+		defer if !ok { vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil) }
+	}
+
 	ok = true
 	return
 }
 
 deinit_renderer :: proc(renderer: ^Renderer) {
+	when ODIN_DEBUG { vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil) }
 	vk.DestroyInstance(renderer.instance, nil)
 }
 
@@ -85,5 +101,40 @@ get_vulkan_extensions :: proc() -> [dynamic]cstring {
 	extensions := make([dynamic]cstring)
 	glfw_required_extensions := glfw.GetRequiredInstanceExtensions()
 	append(&extensions, ..glfw_required_extensions[:])
+	when ODIN_DEBUG { append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME) }
 	return extensions
+}
+
+@(private="file")
+vk_debug_utils_messenger_callback :: proc "std" (message_severity: vk.DebugUtilsMessageSeverityFlagsEXT,
+						 message_type: vk.DebugUtilsMessageTypeFlagsEXT,
+						 callback_data: ^vk.DebugUtilsMessengerCallbackDataEXT,
+						 user_data: rawptr) -> b32 {
+	context = g_context
+	
+	type_string: string
+	switch message_type {
+	case { .GENERAL }:
+		type_string = "General"
+	case { .VALIDATION }:
+		type_string = "Validation"
+	case { .PERFORMANCE }:
+		type_string = "Performance"
+	case:
+		assert(false)
+		type_string = "ERROR"
+	}
+
+	switch message_severity {
+	case { .VERBOSE }:
+		log.debugf("Vulkan %v: %v", type_string, callback_data.pMessage)
+	case { .INFO }:
+		log.infof("Vulkan %v: %v", type_string, callback_data.pMessage)
+	case { .WARNING }:
+		log.warnf("Vulkan %v: %v", type_string, callback_data.pMessage)
+	case { .ERROR }:
+		log.errorf("Vulkan %v: %v", type_string, callback_data.pMessage)
+	}
+
+	return b32(vk.FALSE)
 }
