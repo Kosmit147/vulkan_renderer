@@ -37,8 +37,10 @@ init_renderer :: proc(renderer: ^Renderer,
 
 	wanted_layers := get_vulkan_layers()
 	defer delete(wanted_layers)
-	wanted_extensions := get_vulkan_extensions()
-	defer delete(wanted_extensions)
+	wanted_instance_extensions := get_vulkan_instance_extensions()
+	defer delete(wanted_instance_extensions)
+	wanted_device_extensions := get_vulkan_device_extensions()
+	defer delete(wanted_device_extensions)
 
 	instance_debug_messenger_create_info := get_vk_debug_messenger_create_info()
 	instance_create_info := vk.InstanceCreateInfo {
@@ -47,8 +49,8 @@ init_renderer :: proc(renderer: ^Renderer,
 		pApplicationInfo = &application_info,
 		enabledLayerCount = cast(u32)len(wanted_layers),
 		ppEnabledLayerNames = raw_data(wanted_layers),
-		enabledExtensionCount = cast(u32)len(wanted_extensions),
-		ppEnabledExtensionNames = raw_data(wanted_extensions),
+		enabledExtensionCount = cast(u32)len(wanted_instance_extensions),
+		ppEnabledExtensionNames = raw_data(wanted_instance_extensions),
 	}
 
 	if vk.CreateInstance(&instance_create_info, nil, &renderer.instance) != .SUCCESS do return
@@ -100,12 +102,7 @@ init_renderer :: proc(renderer: ^Renderer,
 
 	suitable_physical_device_found := false
 	for &device in physical_devices {
-		device_properties: vk.PhysicalDeviceProperties
-		device_features: vk.PhysicalDeviceFeatures
-		vk.GetPhysicalDeviceProperties(device, &device_properties)
-		vk.GetPhysicalDeviceFeatures(device, &device_features)
-
-		if device_properties.deviceType == .DISCRETE_GPU {
+		if is_suitable_physical_device(device, wanted_device_extensions[:]) {
 			renderer.physical_device = device
 			suitable_physical_device_found = true
 			break
@@ -170,8 +167,8 @@ init_renderer :: proc(renderer: ^Renderer,
 		pEnabledFeatures = &physical_device_features,
 		enabledLayerCount = cast(u32)len(wanted_layers),
 		ppEnabledLayerNames = raw_data(wanted_layers),
-		enabledExtensionCount = 0,
-		ppEnabledExtensionNames = nil,
+		enabledExtensionCount = cast(u32)len(wanted_device_extensions),
+		ppEnabledExtensionNames = raw_data(wanted_device_extensions),
 	}
 
 	if vk.CreateDevice(renderer.physical_device, &device_create_info, nil, &renderer.device) != .SUCCESS do return
@@ -198,12 +195,52 @@ get_vulkan_layers :: proc() -> [dynamic]cstring {
 }
 
 @(private="file")
-get_vulkan_extensions :: proc() -> [dynamic]cstring {
+get_vulkan_instance_extensions :: proc() -> [dynamic]cstring {
 	extensions := make([dynamic]cstring)
 	glfw_required_extensions := glfw.GetRequiredInstanceExtensions()
 	append(&extensions, ..glfw_required_extensions[:])
 	when ODIN_DEBUG { append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME) }
 	return extensions
+}
+
+@(private="file")
+get_vulkan_device_extensions :: proc() -> [dynamic]cstring {
+	extensions := make([dynamic]cstring)
+	append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+	return extensions
+}
+
+@(private="file")
+is_suitable_physical_device :: proc(physical_device: vk.PhysicalDevice,
+				    required_device_extensions: []cstring) -> (ok := false) {
+	device_properties: vk.PhysicalDeviceProperties
+	vk.GetPhysicalDeviceProperties(physical_device, &device_properties)
+	device_features: vk.PhysicalDeviceFeatures
+	vk.GetPhysicalDeviceFeatures(physical_device, &device_features)
+
+	device_extension_count: u32
+	vk.EnumerateDeviceExtensionProperties(physical_device, nil, &device_extension_count, nil)
+	device_extensions := make([dynamic]vk.ExtensionProperties, device_extension_count)
+	defer delete(device_extensions)
+	vk.EnumerateDeviceExtensionProperties(physical_device, nil, &device_extension_count, raw_data(device_extensions))
+
+	for required_extension in required_device_extensions {
+		required_extension_found := false
+
+		for &device_extension in device_extensions {
+			if required_extension == cast(cstring)raw_data(&device_extension.extensionName) {
+				required_extension_found = true
+				break
+			}
+		}
+		
+		if !required_extension_found do return
+	}
+
+	if device_properties.deviceType != .DISCRETE_GPU do return
+
+	ok = true
+	return
 }
 
 @(private="file")
