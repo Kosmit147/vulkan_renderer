@@ -38,69 +38,15 @@ init_renderer :: proc(renderer: ^Renderer,
 	vk.load_proc_addresses_global(rawptr(glfw.GetInstanceProcAddress))
 	assert(vk.CreateInstance != nil, "Vulkan function pointers not loaded")
 
-	application_info := vk.ApplicationInfo {
-		sType = .APPLICATION_INFO,
-		pApplicationName = application_name,
-		applicationVersion = vk.MAKE_VERSION(1, 0, 0),
-		pEngineName = "No Engine",
-		engineVersion = vk.MAKE_VERSION(1, 0, 0),
-		apiVersion = vk.API_VERSION_1_0,
-	}
+	layers := get_vulkan_layers()
+	defer delete(layers)
+	instance_extensions := get_vulkan_instance_extensions()
+	defer delete(instance_extensions)
+	device_extensions := get_vulkan_device_extensions()
+	defer delete(device_extensions)
 
-	wanted_layers := get_vulkan_layers()
-	defer delete(wanted_layers)
-	wanted_instance_extensions := get_vulkan_instance_extensions()
-	defer delete(wanted_instance_extensions)
-	wanted_device_extensions := get_vulkan_device_extensions()
-	defer delete(wanted_device_extensions)
-
-	instance_debug_messenger_create_info := get_vk_debug_messenger_create_info()
-	instance_create_info := vk.InstanceCreateInfo {
-		sType = .INSTANCE_CREATE_INFO,
-		pNext = &instance_debug_messenger_create_info,
-		pApplicationInfo = &application_info,
-		enabledLayerCount = cast(u32)len(wanted_layers),
-		ppEnabledLayerNames = raw_data(wanted_layers),
-		enabledExtensionCount = cast(u32)len(wanted_instance_extensions),
-		ppEnabledExtensionNames = raw_data(wanted_instance_extensions),
-	}
-
-	if vk.CreateInstance(&instance_create_info, nil, &renderer.instance) != .SUCCESS do return
-	defer if !ok do vk.DestroyInstance(renderer.instance, nil)
-	vk.load_proc_addresses_instance(renderer.instance)
-
-	{
-		supported_extension_count: u32
-		vk.EnumerateInstanceExtensionProperties(nil, &supported_extension_count, nil)
-		supported_extensions := make([dynamic]vk.ExtensionProperties, supported_extension_count)
-		defer delete(supported_extensions)
-		vk.EnumerateInstanceExtensionProperties(nil, &supported_extension_count, raw_data(supported_extensions))
-
-		log.infof("Supported extensions:")
-		for &extension in supported_extensions do log.infof("\t%v", cast(cstring)raw_data(&extension.extensionName))
-		log.info()
-	}
-
-	{
-		supported_layer_count: u32
-		vk.EnumerateInstanceLayerProperties(&supported_layer_count, nil)
-		supported_layers := make([dynamic]vk.LayerProperties, supported_layer_count)
-		defer delete(supported_layers)
-		vk.EnumerateInstanceLayerProperties(&supported_layer_count, raw_data(supported_layers))
-
-		log.infof("Supported layers:")
-		for &layer in supported_layers do log.infof("\t%v", cast(cstring)raw_data(&layer.layerName))
-		log.info()
-	}
-
-	when ODIN_DEBUG {
-		debug_utils_messenger_create_info := get_vk_debug_messenger_create_info()
-		if vk.CreateDebugUtilsMessengerEXT(renderer.instance,
-						   &debug_utils_messenger_create_info,
-						   nil,
-						   &renderer.debug_utils_messenger) != .SUCCESS { return }
-		defer if !ok do vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil)
-	}
+	if !init_renderer_instance(renderer, application_name, layers[:], instance_extensions[:]) do return
+	defer if !ok do deinit_renderer_instance(renderer^)
 
 	if glfw.CreateWindowSurface(renderer.instance, glfw_window_handle, nil, &renderer.surface) != .SUCCESS do return
 	defer if !ok do vk.DestroySurfaceKHR(renderer.instance, renderer.surface, nil)
@@ -117,7 +63,7 @@ init_renderer :: proc(renderer: ^Renderer,
 	for &device in physical_devices {
 		device_suitable := false
 		swap_chain_creation_properties, device_suitable = try_physical_device(device,
-										      wanted_device_extensions[:],
+										      device_extensions[:],
 										      glfw_window_handle,
 										      renderer.surface)
 		if device_suitable {
@@ -183,10 +129,10 @@ init_renderer :: proc(renderer: ^Renderer,
 		pQueueCreateInfos = raw_data(queue_create_infos),
 		queueCreateInfoCount = cast(u32)len(queue_create_infos),
 		pEnabledFeatures = &physical_device_features,
-		enabledLayerCount = cast(u32)len(wanted_layers),
-		ppEnabledLayerNames = raw_data(wanted_layers),
-		enabledExtensionCount = cast(u32)len(wanted_device_extensions),
-		ppEnabledExtensionNames = raw_data(wanted_device_extensions),
+		enabledLayerCount = cast(u32)len(layers),
+		ppEnabledLayerNames = raw_data(layers),
+		enabledExtensionCount = cast(u32)len(device_extensions),
+		ppEnabledExtensionNames = raw_data(device_extensions),
 	}
 
 	if vk.CreateDevice(renderer.physical_device, &device_create_info, nil, &renderer.device) != .SUCCESS do return
@@ -267,15 +213,110 @@ init_renderer :: proc(renderer: ^Renderer,
 	return
 }
 
-deinit_renderer :: proc(renderer: ^Renderer) {
+deinit_renderer :: proc(renderer: Renderer) {
 	destroy_image_views(renderer.device, renderer.swap_chain_image_views[:])
 	delete(renderer.swap_chain_image_views)
 	delete(renderer.swap_chain_images)
 	vk.DestroySwapchainKHR(renderer.device, renderer.swap_chain, nil)
 	vk.DestroyDevice(renderer.device, nil)
 	vk.DestroySurfaceKHR(renderer.instance, renderer.surface, nil)
+	deinit_renderer_instance(renderer)
+}
+
+@(private="file")
+init_renderer_instance :: proc(renderer: ^Renderer,
+			       application_name: cstring,
+			       instance_layers: []cstring,
+			       instance_extensions: []cstring) -> (ok := false) {
+	application_info := vk.ApplicationInfo {
+		sType = .APPLICATION_INFO,
+		pApplicationName = application_name,
+		applicationVersion = vk.MAKE_VERSION(1, 0, 0),
+		pEngineName = "No Engine",
+		engineVersion = vk.MAKE_VERSION(1, 0, 0),
+		apiVersion = vk.API_VERSION_1_0,
+	}
+
+	instance_debug_messenger_create_info := get_vk_debug_messenger_create_info()
+	instance_create_info := vk.InstanceCreateInfo {
+		sType = .INSTANCE_CREATE_INFO,
+		pNext = &instance_debug_messenger_create_info,
+		pApplicationInfo = &application_info,
+		enabledLayerCount = cast(u32)len(instance_layers),
+		ppEnabledLayerNames = raw_data(instance_layers),
+		enabledExtensionCount = cast(u32)len(instance_extensions),
+		ppEnabledExtensionNames = raw_data(instance_extensions),
+	}
+
+	if vk.CreateInstance(&instance_create_info, nil, &renderer.instance) != .SUCCESS do return
+	defer if !ok do vk.DestroyInstance(renderer.instance, nil)
+	vk.load_proc_addresses_instance(renderer.instance)
+
+	{
+		supported_extension_count: u32
+		vk.EnumerateInstanceExtensionProperties(nil, &supported_extension_count, nil)
+		supported_extensions := make([dynamic]vk.ExtensionProperties, supported_extension_count)
+		defer delete(supported_extensions)
+		vk.EnumerateInstanceExtensionProperties(nil, &supported_extension_count, raw_data(supported_extensions))
+
+		log.infof("Supported extensions:")
+		for &extension in supported_extensions do log.infof("\t%v", cast(cstring)raw_data(&extension.extensionName))
+		log.info()
+	}
+
+	{
+		supported_layer_count: u32
+		vk.EnumerateInstanceLayerProperties(&supported_layer_count, nil)
+		supported_layers := make([dynamic]vk.LayerProperties, supported_layer_count)
+		defer delete(supported_layers)
+		vk.EnumerateInstanceLayerProperties(&supported_layer_count, raw_data(supported_layers))
+
+		log.infof("Supported layers:")
+		for &layer in supported_layers do log.infof("\t%v", cast(cstring)raw_data(&layer.layerName))
+		log.info()
+	}
+
+	when ODIN_DEBUG {
+		debug_utils_messenger_create_info := get_vk_debug_messenger_create_info()
+		if vk.CreateDebugUtilsMessengerEXT(renderer.instance,
+						   &debug_utils_messenger_create_info,
+						   nil,
+						   &renderer.debug_utils_messenger) != .SUCCESS { return }
+		defer if !ok do vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil)
+	}
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_instance :: proc(renderer: Renderer) {
 	when ODIN_DEBUG { vk.DestroyDebugUtilsMessengerEXT(renderer.instance, renderer.debug_utils_messenger, nil) }
 	vk.DestroyInstance(renderer.instance, nil)
+}
+
+@(private="file")
+init_renderer_device :: proc() -> (ok := false) {
+	// TODO
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_device :: proc() {
+	// TODO
+}
+
+@(private="file")
+init_renderer_swap_chain :: proc() -> (ok := false) {
+	// TODO
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_swap_chain :: proc() {
+	// TODO
 }
 
 @(private="file")

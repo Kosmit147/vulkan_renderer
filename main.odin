@@ -63,7 +63,7 @@ main :: proc() {
 
 	renderer: Renderer
 	if !init_renderer(&renderer, "Renderer", window) do log.panic("Failed to initialize the renderer!")
-	defer deinit_renderer(&renderer)
+	defer deinit_renderer(renderer)
 
 	for !glfw.WindowShouldClose(window) {
 		glfw.PollEvents()
