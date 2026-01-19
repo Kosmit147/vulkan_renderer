@@ -20,6 +20,7 @@ Renderer :: struct {
 	surface: vk.SurfaceKHR,
 	swap_chain: vk.SwapchainKHR,
 	swap_chain_images: [dynamic]vk.Image,
+	swap_chain_image_views: [dynamic]vk.ImageView,
 	swap_chain_image_format: vk.Format,
 	swap_chain_extent: vk.Extent2D,
 }
@@ -238,11 +239,37 @@ init_renderer :: proc(renderer: ^Renderer,
 	renderer.swap_chain_image_format = swap_chain_creation_properties.surface_format.format
 	renderer.swap_chain_extent = swap_chain_creation_properties.extent
 
+	renderer.swap_chain_image_views = make([dynamic]vk.ImageView, 0, len(renderer.swap_chain_images))
+	defer if !ok do destroy_image_views(renderer.device, renderer.swap_chain_image_views[:])
+	defer if !ok do delete(renderer.swap_chain_image_views)
+	for image in renderer.swap_chain_images {
+		image_view_create_info := vk.ImageViewCreateInfo {
+			sType = .IMAGE_VIEW_CREATE_INFO,
+			image = image,
+			viewType = .D2,
+			format = renderer.swap_chain_image_format,
+			components = { .IDENTITY, .IDENTITY, .IDENTITY, .IDENTITY },
+			subresourceRange = { 
+				aspectMask = { .COLOR },
+				baseMipLevel = 0,
+				levelCount = 1,
+				baseArrayLayer = 0,
+				layerCount = 1,
+			},
+		}
+		image_view: vk.ImageView
+		if vk.CreateImageView(renderer.device, &image_view_create_info, nil, &image_view) != .SUCCESS do return
+		append(&renderer.swap_chain_image_views, image_view)
+	}
+	assert(len(renderer.swap_chain_images) == len(renderer.swap_chain_image_views))
+
 	ok = true
 	return
 }
 
 deinit_renderer :: proc(renderer: ^Renderer) {
+	destroy_image_views(renderer.device, renderer.swap_chain_image_views[:])
+	delete(renderer.swap_chain_image_views)
 	delete(renderer.swap_chain_images)
 	vk.DestroySwapchainKHR(renderer.device, renderer.swap_chain, nil)
 	vk.DestroyDevice(renderer.device, nil)
@@ -362,6 +389,11 @@ try_physical_device :: proc(physical_device: vk.PhysicalDevice,
 
 	ok = true
 	return
+}
+
+@(private="file")
+destroy_image_views :: proc(device: vk.Device, image_views: []vk.ImageView) {
+	for image_view in image_views do vk.DestroyImageView(device, image_view, nil)
 }
 
 @(private="file")
