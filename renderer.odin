@@ -5,6 +5,11 @@ import "vendor:glfw"
 
 import "core:log"
 
+@(rodata)
+vertex_shader_bytecode := #load("shader_vert.spv")
+@(rodata)
+fragment_shader_bytecode := #load("shader_frag.spv")
+
 Renderer :: struct {
 	instance: vk.Instance,
 	debug_utils_messenger: vk.DebugUtilsMessengerEXT,
@@ -21,11 +26,11 @@ Renderer :: struct {
 	swap_chain: vk.SwapchainKHR,
 	swap_chain_images: [dynamic]vk.Image,
 	swap_chain_image_views: [dynamic]vk.ImageView,
-	swap_chain_image_format: vk.Format,
-	swap_chain_extent: vk.Extent2D,
+	swap_chain_image_format: vk.Format, // Is this needed?
+	swap_chain_extent: vk.Extent2D, // Is this needed?
 }
 
-Swap_Chain_Creation_Properties :: struct {
+Swap_Chain_Properties :: struct {
 	surface_capabilities: vk.SurfaceCapabilitiesKHR,
 	surface_format: vk.SurfaceFormatKHR,
 	presentation_mode: vk.PresentModeKHR,
@@ -47,87 +52,20 @@ init_renderer :: proc(renderer: ^Renderer,
 
 	init_renderer_instance(renderer, application_name, layers[:], instance_extensions[:]) or_return
 	defer if !ok do deinit_renderer_instance(renderer^)
-	swap_chain_creation_properties := init_renderer_device(renderer, window, layers[:], device_extensions[:]) or_return
+	swap_chain_properties := init_renderer_device(renderer, window, layers[:], device_extensions[:]) or_return
 	defer if !ok do deinit_renderer_device(renderer^)
-
-	swap_chain_min_image_count := swap_chain_creation_properties.surface_capabilities.minImageCount
-	swap_chain_max_image_count := swap_chain_creation_properties.surface_capabilities.maxImageCount
-	wanted_swap_chain_image_count := swap_chain_min_image_count + 1
-	if swap_chain_max_image_count != 0 {
-		wanted_swap_chain_image_count = min(wanted_swap_chain_image_count, swap_chain_max_image_count)
-	}
-
-	queue_family_indices := [2]u32{
-		renderer.graphics_queue_family_index,
-		renderer.presentation_queue_family_index
-	}
-
-	swap_chain_image_sharing_mode: vk.SharingMode =
-		.CONCURRENT if renderer.graphics_queue_family_index != renderer.presentation_queue_family_index else .EXCLUSIVE
-
-	swap_chain_create_info := vk.SwapchainCreateInfoKHR {
-		sType = .SWAPCHAIN_CREATE_INFO_KHR,
-		surface = renderer.surface,
-		minImageCount = wanted_swap_chain_image_count,
-		imageFormat = swap_chain_creation_properties.surface_format.format,
-		imageColorSpace = swap_chain_creation_properties.surface_format.colorSpace,
-		imageExtent = swap_chain_creation_properties.extent,
-		imageArrayLayers = 1,
-		imageUsage = { .COLOR_ATTACHMENT },
-		imageSharingMode = swap_chain_image_sharing_mode,
-		queueFamilyIndexCount = len(queue_family_indices),
-		pQueueFamilyIndices = raw_data(&queue_family_indices),
-		preTransform = swap_chain_creation_properties.surface_capabilities.currentTransform,
-		compositeAlpha = { .OPAQUE },
-		presentMode = swap_chain_creation_properties.presentation_mode,
-		clipped = true,
-	}
-	
-	if vk.CreateSwapchainKHR(renderer.device, &swap_chain_create_info, nil, &renderer.swap_chain) != .SUCCESS do return
-	defer if !ok do vk.DestroySwapchainKHR(renderer.device, renderer.swap_chain, nil)
-
-	swap_chain_image_count: u32
-	vk.GetSwapchainImagesKHR(renderer.device, renderer.swap_chain, &swap_chain_image_count, nil)
-	renderer.swap_chain_images = make([dynamic]vk.Image, swap_chain_image_count)
-	vk.GetSwapchainImagesKHR(renderer.device, renderer.swap_chain, &swap_chain_image_count, raw_data(renderer.swap_chain_images))
-	defer if !ok do delete(renderer.swap_chain_images)
-
-	renderer.swap_chain_image_format = swap_chain_creation_properties.surface_format.format
-	renderer.swap_chain_extent = swap_chain_creation_properties.extent
-
-	renderer.swap_chain_image_views = make([dynamic]vk.ImageView, 0, len(renderer.swap_chain_images))
-	defer if !ok do destroy_image_views(renderer.device, renderer.swap_chain_image_views[:])
-	defer if !ok do delete(renderer.swap_chain_image_views)
-	for image in renderer.swap_chain_images {
-		image_view_create_info := vk.ImageViewCreateInfo {
-			sType = .IMAGE_VIEW_CREATE_INFO,
-			image = image,
-			viewType = .D2,
-			format = renderer.swap_chain_image_format,
-			components = { .IDENTITY, .IDENTITY, .IDENTITY, .IDENTITY },
-			subresourceRange = { 
-				aspectMask = { .COLOR },
-				baseMipLevel = 0,
-				levelCount = 1,
-				baseArrayLayer = 0,
-				layerCount = 1,
-			},
-		}
-		image_view: vk.ImageView
-		if vk.CreateImageView(renderer.device, &image_view_create_info, nil, &image_view) != .SUCCESS do return
-		append(&renderer.swap_chain_image_views, image_view)
-	}
-	assert(len(renderer.swap_chain_images) == len(renderer.swap_chain_image_views))
+	init_renderer_swap_chain(renderer, swap_chain_properties) or_return
+	defer if !ok do deinit_renderer_swap_chain(renderer^)
+	init_renderer_graphics_pipeline(renderer) or_return
+	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
 
 	ok = true
 	return
 }
 
 deinit_renderer :: proc(renderer: Renderer) {
-	destroy_image_views(renderer.device, renderer.swap_chain_image_views[:])
-	delete(renderer.swap_chain_image_views)
-	delete(renderer.swap_chain_images)
-	vk.DestroySwapchainKHR(renderer.device, renderer.swap_chain, nil)
+	deinit_renderer_graphics_pipeline(renderer)
+	deinit_renderer_swap_chain(renderer)
 	deinit_renderer_device(renderer)
 	deinit_renderer_instance(renderer)
 }
@@ -208,7 +146,7 @@ deinit_renderer_instance :: proc(renderer: Renderer) {
 init_renderer_device :: proc(renderer: ^Renderer,
 			     window: glfw.WindowHandle,
 			     layers: []cstring,
-			     extensions: []cstring) -> (swap_chain_properties: Swap_Chain_Creation_Properties, ok := false) {
+			     extensions: []cstring) -> (swap_chain_properties: Swap_Chain_Properties, ok := false) {
 	if glfw.CreateWindowSurface(renderer.instance, window, nil, &renderer.surface) != .SUCCESS do return
 	defer if !ok do vk.DestroySurfaceKHR(renderer.instance, renderer.surface, nil)
 
@@ -283,7 +221,7 @@ init_renderer_device :: proc(renderer: ^Renderer,
 	}
 
 	physical_device_features := vk.PhysicalDeviceFeatures{}
-	
+
 	device_create_info := vk.DeviceCreateInfo {
 		sType = .DEVICE_CREATE_INFO,
 		pQueueCreateInfos = raw_data(queue_create_infos),
@@ -311,15 +249,117 @@ deinit_renderer_device :: proc(renderer: Renderer) {
 }
 
 @(private="file")
-init_renderer_swap_chain :: proc() -> (ok := false) {
-	// TODO
+init_renderer_swap_chain :: proc(renderer: ^Renderer,
+				 swap_chain_properties: Swap_Chain_Properties) -> (ok := false) {
+	swap_chain_min_image_count := swap_chain_properties.surface_capabilities.minImageCount
+	swap_chain_max_image_count := swap_chain_properties.surface_capabilities.maxImageCount
+	wanted_swap_chain_image_count := swap_chain_min_image_count + 1
+	if swap_chain_max_image_count != 0 {
+		wanted_swap_chain_image_count = min(wanted_swap_chain_image_count, swap_chain_max_image_count)
+	}
+
+	queue_family_indices := [2]u32{
+		renderer.graphics_queue_family_index,
+		renderer.presentation_queue_family_index
+	}
+
+	swap_chain_image_sharing_mode: vk.SharingMode =
+		.CONCURRENT if renderer.graphics_queue_family_index != renderer.presentation_queue_family_index else .EXCLUSIVE
+
+	swap_chain_create_info := vk.SwapchainCreateInfoKHR {
+		sType = .SWAPCHAIN_CREATE_INFO_KHR,
+		surface = renderer.surface,
+		minImageCount = wanted_swap_chain_image_count,
+		imageFormat = swap_chain_properties.surface_format.format,
+		imageColorSpace = swap_chain_properties.surface_format.colorSpace,
+		imageExtent = swap_chain_properties.extent,
+		imageArrayLayers = 1,
+		imageUsage = { .COLOR_ATTACHMENT },
+		imageSharingMode = swap_chain_image_sharing_mode,
+		queueFamilyIndexCount = len(queue_family_indices),
+		pQueueFamilyIndices = raw_data(&queue_family_indices),
+		preTransform = swap_chain_properties.surface_capabilities.currentTransform,
+		compositeAlpha = { .OPAQUE },
+		presentMode = swap_chain_properties.presentation_mode,
+		clipped = true,
+	}
+
+	if vk.CreateSwapchainKHR(renderer.device, &swap_chain_create_info, nil, &renderer.swap_chain) != .SUCCESS do return
+	defer if !ok do vk.DestroySwapchainKHR(renderer.device, renderer.swap_chain, nil)
+
+	swap_chain_image_count: u32
+	vk.GetSwapchainImagesKHR(renderer.device, renderer.swap_chain, &swap_chain_image_count, nil)
+	renderer.swap_chain_images = make([dynamic]vk.Image, swap_chain_image_count)
+	vk.GetSwapchainImagesKHR(renderer.device, renderer.swap_chain, &swap_chain_image_count, raw_data(renderer.swap_chain_images))
+	defer if !ok do delete(renderer.swap_chain_images)
+
+	renderer.swap_chain_image_format = swap_chain_properties.surface_format.format
+	renderer.swap_chain_extent = swap_chain_properties.extent
+
+	renderer.swap_chain_image_views = make([dynamic]vk.ImageView, 0, len(renderer.swap_chain_images))
+	defer if !ok do destroy_image_views(renderer.device, renderer.swap_chain_image_views[:])
+	defer if !ok do delete(renderer.swap_chain_image_views)
+	for image in renderer.swap_chain_images {
+		image_view_create_info := vk.ImageViewCreateInfo {
+			sType = .IMAGE_VIEW_CREATE_INFO,
+			image = image,
+			viewType = .D2,
+			format = renderer.swap_chain_image_format,
+			components = { .IDENTITY, .IDENTITY, .IDENTITY, .IDENTITY },
+			subresourceRange = {
+				aspectMask = { .COLOR },
+				baseMipLevel = 0,
+				levelCount = 1,
+				baseArrayLayer = 0,
+				layerCount = 1,
+			},
+		}
+		image_view: vk.ImageView
+		if vk.CreateImageView(renderer.device, &image_view_create_info, nil, &image_view) != .SUCCESS do return
+		append(&renderer.swap_chain_image_views, image_view)
+	}
+	assert(len(renderer.swap_chain_images) == len(renderer.swap_chain_image_views))
+
 	ok = true
 	return
 }
 
 @(private="file")
-deinit_renderer_swap_chain :: proc() {
-	// TODO
+deinit_renderer_swap_chain :: proc(renderer: Renderer) {
+	destroy_image_views(renderer.device, renderer.swap_chain_image_views[:])
+	delete(renderer.swap_chain_image_views)
+	delete(renderer.swap_chain_images)
+	vk.DestroySwapchainKHR(renderer.device, renderer.swap_chain, nil)
+}
+
+@(private="file")
+init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
+	vertex_shader_module := create_shader_module(renderer.device, vertex_shader_bytecode) or_return
+	defer destroy_shader_module(renderer.device, vertex_shader_module)
+	fragment_shader_module := create_shader_module(renderer.device, fragment_shader_bytecode) or_return
+	defer destroy_shader_module(renderer.device, fragment_shader_module)
+
+	pipeline_shader_stage_create_infos := [2]vk.PipelineShaderStageCreateInfo {
+		vk.PipelineShaderStageCreateInfo {
+			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+			stage = { .VERTEX },
+			module = vertex_shader_module,
+			pName = "main",
+		},
+		vk.PipelineShaderStageCreateInfo {
+			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+			stage = { .FRAGMENT },
+			module = fragment_shader_module,
+			pName = "main",
+		},
+	}
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_graphics_pipeline :: proc(renderer: Renderer) {
 }
 
 @(private="file")
@@ -349,7 +389,7 @@ get_vulkan_device_extensions :: proc() -> [dynamic]cstring {
 try_physical_device :: proc(physical_device: vk.PhysicalDevice,
 			    required_device_extensions: []cstring,
 			    window: glfw.WindowHandle,
-			    surface: vk.SurfaceKHR) -> (swap_chain_properties: Swap_Chain_Creation_Properties, ok := false) {
+			    surface: vk.SurfaceKHR) -> (swap_chain_properties: Swap_Chain_Properties, ok := false) {
 	device_properties: vk.PhysicalDeviceProperties
 	vk.GetPhysicalDeviceProperties(physical_device, &device_properties)
 	if device_properties.deviceType != .DISCRETE_GPU do return
@@ -369,7 +409,7 @@ try_physical_device :: proc(physical_device: vk.PhysicalDevice,
 				break
 			}
 		}
-		
+
 		if !required_extension_found do return
 	}
 
@@ -456,7 +496,7 @@ vk_debug_utils_messenger_callback :: proc "std" (message_severity: vk.DebugUtils
 						 callback_data: ^vk.DebugUtilsMessengerCallbackDataEXT,
 						 user_data: rawptr) -> b32 {
 	context = g_context
-	
+
 	type_string: string
 	switch message_type {
 	case { .GENERAL }:
