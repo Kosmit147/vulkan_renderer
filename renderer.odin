@@ -16,7 +16,6 @@ Renderer :: struct {
 
 	physical_device: vk.PhysicalDevice,
 	device: vk.Device,
-
 	graphics_queue_family_index: u32,
 	graphics_queue: vk.Queue,
 	presentation_queue_family_index: u32,
@@ -31,6 +30,7 @@ Renderer :: struct {
 
 	render_pass: vk.RenderPass,
 	pipeline_layout: vk.PipelineLayout,
+	pipeline: vk.Pipeline,
 }
 
 Swap_Chain_Properties :: struct {
@@ -371,6 +371,7 @@ init_renderer_render_pass :: proc(renderer: ^Renderer) -> (ok := false) {
 	}
 
 	if vk.CreateRenderPass(renderer.device, &render_pass_create_info, nil, &renderer.render_pass) != .SUCCESS do return
+	defer if !ok do vk.DestroyRenderPass(renderer.device, renderer.render_pass, nil)
 
 	ok = true
 	return
@@ -417,13 +418,6 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 		primitiveRestartEnable = false,
 	}
 
-	dynamic_states := [2]vk.DynamicState { .VIEWPORT, .SCISSOR }
-	pipeline_dynamic_state_create_info := vk.PipelineDynamicStateCreateInfo {
-		sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-		dynamicStateCount = cast(u32)len(dynamic_states),
-		pDynamicStates = raw_data(&dynamic_states),
-	}
-
 	pipeline_viewport_state_create_info := vk.PipelineViewportStateCreateInfo {
 		sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
 		viewportCount = 1,
@@ -460,13 +454,51 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 		pAttachments = &pipeline_color_blend_attachment_state,
 	}
 
+	dynamic_states := [2]vk.DynamicState { .VIEWPORT, .SCISSOR }
+	pipeline_dynamic_state_create_info := vk.PipelineDynamicStateCreateInfo {
+		sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		dynamicStateCount = cast(u32)len(dynamic_states),
+		pDynamicStates = raw_data(&dynamic_states),
+	}
+
 	pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
 		sType = .PIPELINE_LAYOUT_CREATE_INFO,
 	}
 
-	if vk.CreatePipelineLayout(renderer.device, &pipeline_layout_create_info, nil, &renderer.pipeline_layout) != .SUCCESS {
+	if vk.CreatePipelineLayout(renderer.device,
+				   &pipeline_layout_create_info,
+				   nil,
+				   &renderer.pipeline_layout) != .SUCCESS {
 		return
 	}
+	defer if !ok do vk.DestroyPipelineLayout(renderer.device, renderer.pipeline_layout, nil)
+
+	graphics_pipeline_create_info := vk.GraphicsPipelineCreateInfo {
+		sType = .GRAPHICS_PIPELINE_CREATE_INFO,
+		stageCount = cast(u32)len(pipeline_shader_stage_create_infos),
+		pStages = raw_data(&pipeline_shader_stage_create_infos),
+		pVertexInputState = &pipeline_vertex_input_state_create_info,
+		pInputAssemblyState = &pipeline_input_assembly_state_create_info,
+		pViewportState = &pipeline_viewport_state_create_info,
+		pRasterizationState = &pipeline_rasterization_state_create_info,
+		pMultisampleState = &pipeline_multisample_state_create_info,
+		pDepthStencilState = nil,
+		pColorBlendState = &pipeline_color_blend_state_create_info,
+		pDynamicState = &pipeline_dynamic_state_create_info,
+		layout = renderer.pipeline_layout,
+		renderPass = renderer.render_pass,
+		subpass = 0,
+	}
+
+	if vk.CreateGraphicsPipelines(device = renderer.device,
+				      pipelineCache = 0,
+				      createInfoCount = 1,
+				      pCreateInfos = &graphics_pipeline_create_info,
+				      pAllocator = nil,
+				      pPipelines = &renderer.pipeline) != .SUCCESS {
+		return
+	}
+	defer if !ok do vk.DestroyPipeline(renderer.device, renderer.pipeline, nil)
 
 	ok = true
 	return
@@ -474,6 +506,7 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 
 @(private="file")
 deinit_renderer_graphics_pipeline :: proc(renderer: Renderer) {
+	vk.DestroyPipeline(renderer.device, renderer.pipeline, nil)
 	vk.DestroyPipelineLayout(renderer.device, renderer.pipeline_layout, nil)
 }
 
