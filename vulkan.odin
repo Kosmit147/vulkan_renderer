@@ -2,7 +2,6 @@ package vulkan_renderer
 
 import vk "vendor:vulkan"
 
-import "core:log"
 import "core:slice"
 
 create_shader_module :: proc(device: vk.Device, bytecode: []byte) -> (module: vk.ShaderModule, ok := false) {

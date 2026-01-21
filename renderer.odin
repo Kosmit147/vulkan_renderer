@@ -26,8 +26,10 @@ Renderer :: struct {
 	swap_chain: vk.SwapchainKHR,
 	swap_chain_images: [dynamic]vk.Image,
 	swap_chain_image_views: [dynamic]vk.ImageView,
-	swap_chain_image_format: vk.Format, // Is this needed?
-	swap_chain_extent: vk.Extent2D, // Is this needed?
+	swap_chain_image_format: vk.Format,
+	swap_chain_extent: vk.Extent2D,
+
+	pipeline_layout: vk.PipelineLayout,
 }
 
 Swap_Chain_Properties :: struct {
@@ -354,12 +356,78 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 		},
 	}
 
+	pipeline_vertex_input_state_create_info := vk.PipelineVertexInputStateCreateInfo {
+		sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		vertexBindingDescriptionCount = 0,
+		pVertexBindingDescriptions = nil,
+		vertexAttributeDescriptionCount = 0,
+		pVertexAttributeDescriptions = nil,
+	}
+
+	pipeline_input_assembly_state_create_info := vk.PipelineInputAssemblyStateCreateInfo {
+		sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		topology = .TRIANGLE_LIST,
+		primitiveRestartEnable = false,
+	}
+
+	dynamic_states := [2]vk.DynamicState { .VIEWPORT, .SCISSOR }
+	pipeline_dynamic_state_create_info := vk.PipelineDynamicStateCreateInfo {
+		sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		dynamicStateCount = cast(u32)len(dynamic_states),
+		pDynamicStates = raw_data(&dynamic_states),
+	}
+
+	pipeline_viewport_state_create_info := vk.PipelineViewportStateCreateInfo {
+		sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		viewportCount = 1,
+		pViewports = nil,
+		scissorCount = 1,
+		pScissors = nil,
+	}
+
+	pipeline_rasterization_state_create_info := vk.PipelineRasterizationStateCreateInfo {
+		sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		depthClampEnable = false,
+		rasterizerDiscardEnable = false,
+		polygonMode = .FILL,
+		lineWidth = 1,
+		cullMode = { .BACK },
+		frontFace = .CLOCKWISE,
+		depthBiasEnable = false,
+	}
+
+	pipeline_multisample_state_create_info := vk.PipelineMultisampleStateCreateInfo {
+		sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		sampleShadingEnable = false,
+		rasterizationSamples = { ._1 },
+	}
+
+	pipeline_color_blend_attachment_state := vk.PipelineColorBlendAttachmentState {
+		colorWriteMask = { .R, .G, .B, .A },
+		blendEnable = false,
+	}
+
+	pipeline_color_blend_state_create_info := vk.PipelineColorBlendStateCreateInfo {
+		sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		attachmentCount = 1,
+		pAttachments = &pipeline_color_blend_attachment_state,
+	}
+
+	pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
+		sType = .PIPELINE_LAYOUT_CREATE_INFO,
+	}
+
+	if vk.CreatePipelineLayout(renderer.device, &pipeline_layout_create_info, nil, &renderer.pipeline_layout) != .SUCCESS {
+		return
+	}
+
 	ok = true
 	return
 }
 
 @(private="file")
 deinit_renderer_graphics_pipeline :: proc(renderer: Renderer) {
+	vk.DestroyPipelineLayout(renderer.device, renderer.pipeline_layout, nil)
 }
 
 @(private="file")
