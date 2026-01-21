@@ -29,6 +29,7 @@ Renderer :: struct {
 	swap_chain_image_format: vk.Format,
 	swap_chain_extent: vk.Extent2D,
 
+	render_pass: vk.RenderPass,
 	pipeline_layout: vk.PipelineLayout,
 }
 
@@ -58,6 +59,8 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_device(renderer^)
 	init_renderer_swap_chain(renderer, swap_chain_properties) or_return
 	defer if !ok do deinit_renderer_swap_chain(renderer^)
+	init_renderer_render_pass(renderer) or_return
+	defer if !ok do deinit_renderer_render_pass(renderer^)
 	init_renderer_graphics_pipeline(renderer) or_return
 	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
 
@@ -67,6 +70,7 @@ init_renderer :: proc(renderer: ^Renderer,
 
 deinit_renderer :: proc(renderer: Renderer) {
 	deinit_renderer_graphics_pipeline(renderer)
+	deinit_renderer_render_pass(renderer)
 	deinit_renderer_swap_chain(renderer)
 	deinit_renderer_device(renderer)
 	deinit_renderer_instance(renderer)
@@ -332,6 +336,49 @@ deinit_renderer_swap_chain :: proc(renderer: Renderer) {
 	delete(renderer.swap_chain_image_views)
 	delete(renderer.swap_chain_images)
 	vk.DestroySwapchainKHR(renderer.device, renderer.swap_chain, nil)
+}
+
+@(private="file")
+init_renderer_render_pass :: proc(renderer: ^Renderer) -> (ok := false) {
+	color_attachment_description := vk.AttachmentDescription {
+		format = renderer.swap_chain_image_format,
+		samples = { ._1 },
+		loadOp = .CLEAR,
+		storeOp = .STORE,
+		stencilLoadOp = .DONT_CARE,
+		stencilStoreOp = .DONT_CARE,
+		initialLayout = .UNDEFINED,
+		finalLayout = .PRESENT_SRC_KHR,
+	}
+
+	color_attachment_ref := vk.AttachmentReference {
+		attachment = 0,
+		layout = .COLOR_ATTACHMENT_OPTIMAL,
+	}
+
+	subpass_description := vk.SubpassDescription {
+		pipelineBindPoint = .GRAPHICS,
+		colorAttachmentCount = 1,
+		pColorAttachments = &color_attachment_ref,
+	}
+
+	render_pass_create_info := vk.RenderPassCreateInfo {
+		sType = .RENDER_PASS_CREATE_INFO,
+		attachmentCount = 1,
+		pAttachments = &color_attachment_description,
+		subpassCount = 1,
+		pSubpasses = &subpass_description,
+	}
+
+	if vk.CreateRenderPass(renderer.device, &render_pass_create_info, nil, &renderer.render_pass) != .SUCCESS do return
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_render_pass :: proc(renderer: Renderer) {
+	vk.DestroyRenderPass(renderer.device, renderer.render_pass, nil)
 }
 
 @(private="file")
