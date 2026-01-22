@@ -31,6 +31,8 @@ Renderer :: struct {
 	render_pass: vk.RenderPass,
 	pipeline_layout: vk.PipelineLayout,
 	pipeline: vk.Pipeline,
+
+	framebuffers: [dynamic]vk.Framebuffer,
 }
 
 Swap_Chain_Properties :: struct {
@@ -63,12 +65,15 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_render_pass(renderer^)
 	init_renderer_graphics_pipeline(renderer) or_return
 	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
+	init_renderer_framebuffers(renderer) or_return
+	defer if !ok do deinit_renderer_framebuffers(renderer^)
 
 	ok = true
 	return
 }
 
 deinit_renderer :: proc(renderer: Renderer) {
+	deinit_renderer_framebuffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
 	deinit_renderer_render_pass(renderer)
 	deinit_renderer_swap_chain(renderer)
@@ -511,6 +516,43 @@ deinit_renderer_graphics_pipeline :: proc(renderer: Renderer) {
 }
 
 @(private="file")
+init_renderer_framebuffers :: proc(renderer: ^Renderer) -> (ok := false) {
+	renderer.framebuffers = make([dynamic]vk.Framebuffer, 0, len(renderer.swap_chain_images))
+	defer if !ok do destroy_framebuffers(renderer.device, renderer.framebuffers[:])
+	defer if !ok do delete(renderer.framebuffers)
+
+	for &image_view in renderer.swap_chain_image_views {
+		framebuffer_create_info := vk.FramebufferCreateInfo {
+			sType = .FRAMEBUFFER_CREATE_INFO,
+			renderPass = renderer.render_pass,
+			attachmentCount = 1,
+			pAttachments = &image_view,
+			width = renderer.swap_chain_extent.width,
+			height = renderer.swap_chain_extent.height,
+			layers = 1,
+		}
+
+		framebuffer: vk.Framebuffer
+		if vk.CreateFramebuffer(renderer.device, &framebuffer_create_info, nil, &framebuffer) != .SUCCESS {
+			return
+		}
+		append(&renderer.framebuffers, framebuffer)
+	}
+
+	assert(len(renderer.framebuffers) == len(renderer.swap_chain_images))
+	assert(len(renderer.framebuffers) == len(renderer.swap_chain_image_views))
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_framebuffers :: proc(renderer: Renderer) {
+	destroy_framebuffers(renderer.device, renderer.framebuffers[:])
+	delete(renderer.framebuffers)
+}
+
+@(private="file")
 get_vulkan_layers :: proc() -> [dynamic]cstring {
 	layers := make([dynamic]cstring)
 	when ODIN_DEBUG { append(&layers, "VK_LAYER_KHRONOS_validation") }
@@ -626,6 +668,11 @@ try_physical_device :: proc(physical_device: vk.PhysicalDevice,
 @(private="file")
 destroy_image_views :: proc(device: vk.Device, image_views: []vk.ImageView) {
 	for image_view in image_views do vk.DestroyImageView(device, image_view, nil)
+}
+
+@(private="file")
+destroy_framebuffers :: proc(device: vk.Device, framebuffers: []vk.Framebuffer) {
+	for framebuffer in framebuffers do vk.DestroyFramebuffer(device, framebuffer, nil)
 }
 
 @(private="file")
