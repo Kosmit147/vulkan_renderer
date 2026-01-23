@@ -756,3 +756,61 @@ vk_debug_utils_messenger_callback :: proc "std" (message_severity: vk.DebugUtils
 
 	return b32(vk.FALSE)
 }
+
+@(private="file")
+renderer_record_command_buffer :: proc(renderer: Renderer,
+				       swap_chain_image_index: u32) -> (ok := false) {
+	command_buffer_begin_info := vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO }
+	if vk.BeginCommandBuffer(renderer.command_buffer, &command_buffer_begin_info) != .SUCCESS do return
+
+	clear_color := vk.ClearValue { color = { float32 = { 0, 0, 0, 1 } } }
+	render_pass_begin_info := vk.RenderPassBeginInfo {
+		sType = .RENDER_PASS_BEGIN_INFO,
+		renderPass = renderer.render_pass,
+		framebuffer = renderer.framebuffers[swap_chain_image_index],
+		renderArea = {
+			offset = { 0, 0 },
+			extent = renderer.swap_chain_extent,
+		},
+		clearValueCount = 1,
+		pClearValues = &clear_color,
+	}
+
+	vk.CmdBeginRenderPass(renderer.command_buffer, &render_pass_begin_info, .INLINE)
+	vk.CmdBindPipeline(renderer.command_buffer, .GRAPHICS, renderer.pipeline)
+
+	viewport := vk.Viewport {
+		x = 0,
+		y = 0,
+		width = f32(renderer.swap_chain_extent.width),
+		height = f32(renderer.swap_chain_extent.height),
+		minDepth = 0,
+		maxDepth = 1,
+	}
+	vk.CmdSetViewport(commandBuffer = renderer.command_buffer,
+			  firstViewport = 0,
+			  viewportCount = 1,
+			  pViewports = &viewport)
+
+	scissor := vk.Rect2D {
+		offset = { 0, 0 },
+		extent = renderer.swap_chain_extent,
+	}
+	vk.CmdSetScissor(commandBuffer = renderer.command_buffer,
+			 firstScissor = 0,
+			 scissorCount = 1,
+			 pScissors = &scissor)
+
+	vk.CmdDraw(commandBuffer = renderer.command_buffer,
+		   vertexCount = 3,
+		   instanceCount = 1,
+		   firstVertex = 0,
+		   firstInstance = 0)
+
+	vk.CmdEndRenderPass(renderer.command_buffer)
+
+	if vk.EndCommandBuffer(renderer.command_buffer) != .SUCCESS do return
+
+	ok = true
+	return
+}
