@@ -31,8 +31,10 @@ Renderer :: struct {
 	render_pass: vk.RenderPass,
 	pipeline_layout: vk.PipelineLayout,
 	pipeline: vk.Pipeline,
-
 	framebuffers: [dynamic]vk.Framebuffer,
+
+	command_pool: vk.CommandPool,
+	command_buffer: vk.CommandBuffer,
 }
 
 Swap_Chain_Properties :: struct {
@@ -67,12 +69,15 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
 	init_renderer_framebuffers(renderer) or_return
 	defer if !ok do deinit_renderer_framebuffers(renderer^)
+	init_renderer_command_buffer(renderer) or_return
+	defer if !ok do deinit_renderer_command_buffer(renderer^)
 
 	ok = true
 	return
 }
 
 deinit_renderer :: proc(renderer: Renderer) {
+	deinit_renderer_command_buffer(renderer)
 	deinit_renderer_framebuffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
 	deinit_renderer_render_pass(renderer)
@@ -550,6 +555,39 @@ init_renderer_framebuffers :: proc(renderer: ^Renderer) -> (ok := false) {
 deinit_renderer_framebuffers :: proc(renderer: Renderer) {
 	destroy_framebuffers(renderer.device, renderer.framebuffers[:])
 	delete(renderer.framebuffers)
+}
+
+@(private="file")
+init_renderer_command_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
+	command_pool_create_info := vk.CommandPoolCreateInfo {
+		sType = .COMMAND_POOL_CREATE_INFO,
+		flags = { .RESET_COMMAND_BUFFER },
+		queueFamilyIndex = renderer.graphics_queue_family_index,
+	}
+
+	if vk.CreateCommandPool(renderer.device, &command_pool_create_info, nil, &renderer.command_pool) != .SUCCESS {
+		return
+	}
+	defer if !ok do vk.DestroyCommandPool(renderer.device, renderer.command_pool, nil)
+
+	command_buffer_allocate_info := vk.CommandBufferAllocateInfo {
+		sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+		commandPool = renderer.command_pool,
+		level = .PRIMARY,
+		commandBufferCount = 1,
+	}
+
+	if vk.AllocateCommandBuffers(renderer.device, &command_buffer_allocate_info, &renderer.command_buffer) != .SUCCESS {
+		return
+	}
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_command_buffer :: proc(renderer: Renderer) {
+	vk.DestroyCommandPool(renderer.device, renderer.command_pool, nil)
 }
 
 @(private="file")
