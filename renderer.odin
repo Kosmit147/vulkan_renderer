@@ -35,6 +35,10 @@ Renderer :: struct {
 
 	command_pool: vk.CommandPool,
 	command_buffer: vk.CommandBuffer,
+
+	image_available_semaphore: vk.Semaphore,
+	render_finished_semaphore: vk.Semaphore,
+	in_flight_fence: vk.Fence,
 }
 
 Swap_Chain_Properties :: struct {
@@ -71,12 +75,17 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_framebuffers(renderer^)
 	init_renderer_command_buffer(renderer) or_return
 	defer if !ok do deinit_renderer_command_buffer(renderer^)
+	init_renderer_synchronization_primitives(renderer) or_return
+	defer if !ok do deinit_renderer_synchronization_primitives(renderer^)
 
 	ok = true
 	return
 }
 
 deinit_renderer :: proc(renderer: Renderer) {
+	vk.DeviceWaitIdle(renderer.device)
+
+	deinit_renderer_synchronization_primitives(renderer)
 	deinit_renderer_command_buffer(renderer)
 	deinit_renderer_framebuffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
@@ -372,12 +381,23 @@ init_renderer_render_pass :: proc(renderer: ^Renderer) -> (ok := false) {
 		pColorAttachments = &color_attachment_ref,
 	}
 
+	subpass_dependency := vk.SubpassDependency {
+		srcSubpass = vk.SUBPASS_EXTERNAL,
+		dstSubpass = 0,
+		srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+		srcAccessMask = {},
+		dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+		dstAccessMask = { .COLOR_ATTACHMENT_WRITE },
+	}
+
 	render_pass_create_info := vk.RenderPassCreateInfo {
 		sType = .RENDER_PASS_CREATE_INFO,
 		attachmentCount = 1,
 		pAttachments = &color_attachment_description,
 		subpassCount = 1,
 		pSubpasses = &subpass_description,
+		dependencyCount = 1,
+		pDependencies = &subpass_dependency,
 	}
 
 	if vk.CreateRenderPass(renderer.device, &render_pass_create_info, nil, &renderer.render_pass) != .SUCCESS do return
@@ -591,6 +611,37 @@ deinit_renderer_command_buffer :: proc(renderer: Renderer) {
 }
 
 @(private="file")
+init_renderer_synchronization_primitives :: proc(renderer: ^Renderer) -> (ok := false) {
+	semaphore_create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
+	if vk.CreateSemaphore(renderer.device, &semaphore_create_info, nil, &renderer.image_available_semaphore) != .SUCCESS {
+		return
+	}
+	defer if !ok do vk.DestroySemaphore(renderer.device, renderer.image_available_semaphore, nil)
+
+	if vk.CreateSemaphore(renderer.device, &semaphore_create_info, nil, &renderer.render_finished_semaphore) != .SUCCESS {
+		return
+	}
+	defer if !ok do vk.DestroySemaphore(renderer.device, renderer.render_finished_semaphore, nil)
+
+	fence_create_info := vk.FenceCreateInfo {
+		sType = .FENCE_CREATE_INFO,
+		flags = { .SIGNALED },
+	}
+	if vk.CreateFence(renderer.device, &fence_create_info, nil, &renderer.in_flight_fence) != .SUCCESS do return
+	defer if !ok do vk.DestroyFence(renderer.device, renderer.in_flight_fence, nil)
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_synchronization_primitives :: proc(renderer: Renderer) {
+	vk.DestroySemaphore(renderer.device, renderer.image_available_semaphore, nil)
+	vk.DestroySemaphore(renderer.device, renderer.render_finished_semaphore, nil)
+	vk.DestroyFence(renderer.device, renderer.in_flight_fence, nil)
+}
+
+@(private="file")
 get_vulkan_layers :: proc() -> [dynamic]cstring {
 	layers := make([dynamic]cstring)
 	when ODIN_DEBUG { append(&layers, "VK_LAYER_KHRONOS_validation") }
@@ -760,6 +811,8 @@ vk_debug_utils_messenger_callback :: proc "std" (message_severity: vk.DebugUtils
 @(private="file")
 renderer_record_command_buffer :: proc(renderer: Renderer,
 				       swap_chain_image_index: u32) -> (ok := false) {
+	vk.ResetCommandBuffer(renderer.command_buffer, {})
+
 	command_buffer_begin_info := vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO }
 	if vk.BeginCommandBuffer(renderer.command_buffer, &command_buffer_begin_info) != .SUCCESS do return
 
@@ -810,6 +863,55 @@ renderer_record_command_buffer :: proc(renderer: Renderer,
 	vk.CmdEndRenderPass(renderer.command_buffer)
 
 	if vk.EndCommandBuffer(renderer.command_buffer) != .SUCCESS do return
+
+	ok = true
+	return
+}
+
+renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
+	vk.WaitForFences(device = renderer.device,
+			 fenceCount = 1,
+			 pFences = &renderer.in_flight_fence,
+			 waitAll = true,
+			 timeout = max(u64))
+	vk.ResetFences(renderer.device, 1, &renderer.in_flight_fence)
+
+	swap_chain_image_index: u32
+	vk.AcquireNextImageKHR(device = renderer.device,
+			       swapchain = renderer.swap_chain,
+			       timeout = max(u64),
+			       semaphore = renderer.image_available_semaphore,
+			       fence = vk.Fence(0),
+			       pImageIndex = &swap_chain_image_index)
+
+	renderer_record_command_buffer(renderer^, swap_chain_image_index)
+
+	pipeline_waiting_stages := vk.PipelineStageFlags{ .COLOR_ATTACHMENT_OUTPUT }
+	submit_info := vk.SubmitInfo {
+		sType = .SUBMIT_INFO,
+		waitSemaphoreCount = 1,
+		pWaitSemaphores = &renderer.image_available_semaphore,
+		pWaitDstStageMask = &pipeline_waiting_stages,
+		commandBufferCount = 1,
+		pCommandBuffers = &renderer.command_buffer,
+		signalSemaphoreCount = 1,
+		pSignalSemaphores = &renderer.render_finished_semaphore,
+	}
+	if vk.QueueSubmit(renderer.graphics_queue, 1, &submit_info, renderer.in_flight_fence) != .SUCCESS {
+		log.errorf("Failed to submit draw command buffer to the graphics queue.")
+		return
+	}
+
+	presentation_info := vk.PresentInfoKHR {
+		sType = .PRESENT_INFO_KHR,
+		waitSemaphoreCount = 1,
+		pWaitSemaphores = &renderer.render_finished_semaphore,
+		swapchainCount = 1,
+		pSwapchains = &renderer.swap_chain,
+		pImageIndices = &swap_chain_image_index,
+	}
+
+	vk.QueuePresentKHR(renderer.presentation_queue, &presentation_info)
 
 	ok = true
 	return
