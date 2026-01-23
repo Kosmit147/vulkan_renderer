@@ -381,23 +381,12 @@ init_renderer_render_pass :: proc(renderer: ^Renderer) -> (ok := false) {
 		pColorAttachments = &color_attachment_ref,
 	}
 
-	subpass_dependency := vk.SubpassDependency {
-		srcSubpass = vk.SUBPASS_EXTERNAL,
-		dstSubpass = 0,
-		srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-		srcAccessMask = {},
-		dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-		dstAccessMask = { .COLOR_ATTACHMENT_WRITE },
-	}
-
 	render_pass_create_info := vk.RenderPassCreateInfo {
 		sType = .RENDER_PASS_CREATE_INFO,
 		attachmentCount = 1,
 		pAttachments = &color_attachment_description,
 		subpassCount = 1,
 		pSubpasses = &subpass_description,
-		dependencyCount = 1,
-		pDependencies = &subpass_dependency,
 	}
 
 	if vk.CreateRenderPass(renderer.device, &render_pass_create_info, nil, &renderer.render_pass) != .SUCCESS do return
@@ -886,7 +875,7 @@ renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
 
 	renderer_record_command_buffer(renderer^, swap_chain_image_index)
 
-	pipeline_waiting_stages := vk.PipelineStageFlags{ .COLOR_ATTACHMENT_OUTPUT }
+	pipeline_waiting_stages := vk.PipelineStageFlags{ .TOP_OF_PIPE }
 	submit_info := vk.SubmitInfo {
 		sType = .SUBMIT_INFO,
 		waitSemaphoreCount = 1,
