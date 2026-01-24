@@ -10,6 +10,8 @@ vertex_shader_bytecode := #load("shader_vert.spv")
 @(rodata)
 fragment_shader_bytecode := #load("shader_frag.spv")
 
+MAX_FRAMES_IN_FLIGHT :: 2
+
 Renderer :: struct {
 	instance: vk.Instance,
 	debug_utils_messenger: vk.DebugUtilsMessengerEXT,
@@ -34,11 +36,13 @@ Renderer :: struct {
 	framebuffers: [dynamic]vk.Framebuffer,
 
 	command_pool: vk.CommandPool,
-	command_buffer: vk.CommandBuffer,
+	command_buffers: [dynamic]vk.CommandBuffer,
 
-	image_available_semaphore: vk.Semaphore,
-	render_finished_semaphore: vk.Semaphore,
-	in_flight_fence: vk.Fence,
+	image_available_semaphores: [dynamic]vk.Semaphore,
+	render_finished_semaphores: [dynamic]vk.Semaphore,
+	in_flight_fences: [dynamic]vk.Fence,
+
+	current_frame: u32,
 }
 
 Swap_Chain_Properties :: struct {
@@ -73,8 +77,8 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
 	init_renderer_framebuffers(renderer) or_return
 	defer if !ok do deinit_renderer_framebuffers(renderer^)
-	init_renderer_command_buffer(renderer) or_return
-	defer if !ok do deinit_renderer_command_buffer(renderer^)
+	init_renderer_command_buffers(renderer) or_return
+	defer if !ok do deinit_renderer_command_buffers(renderer^)
 	init_renderer_synchronization_primitives(renderer) or_return
 	defer if !ok do deinit_renderer_synchronization_primitives(renderer^)
 
@@ -86,7 +90,7 @@ deinit_renderer :: proc(renderer: Renderer) {
 	vk.DeviceWaitIdle(renderer.device)
 
 	deinit_renderer_synchronization_primitives(renderer)
-	deinit_renderer_command_buffer(renderer)
+	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_framebuffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
 	deinit_renderer_render_pass(renderer)
@@ -322,8 +326,10 @@ init_renderer_swap_chain :: proc(renderer: ^Renderer,
 	renderer.swap_chain_extent = swap_chain_properties.extent
 
 	renderer.swap_chain_image_views = make([dynamic]vk.ImageView, 0, len(renderer.swap_chain_images))
-	defer if !ok do destroy_image_views(renderer.device, renderer.swap_chain_image_views[:])
-	defer if !ok do delete(renderer.swap_chain_image_views)
+	defer if !ok {
+		destroy_image_views(renderer.device, renderer.swap_chain_image_views[:])
+		delete(renderer.swap_chain_image_views)
+	}
 	for image in renderer.swap_chain_images {
 		image_view_create_info := vk.ImageViewCreateInfo {
 			sType = .IMAGE_VIEW_CREATE_INFO,
@@ -532,8 +538,10 @@ deinit_renderer_graphics_pipeline :: proc(renderer: Renderer) {
 @(private="file")
 init_renderer_framebuffers :: proc(renderer: ^Renderer) -> (ok := false) {
 	renderer.framebuffers = make([dynamic]vk.Framebuffer, 0, len(renderer.swap_chain_images))
-	defer if !ok do destroy_framebuffers(renderer.device, renderer.framebuffers[:])
-	defer if !ok do delete(renderer.framebuffers)
+	defer if !ok {
+		destroy_framebuffers(renderer.device, renderer.framebuffers[:])
+		delete(renderer.framebuffers)
+	}
 
 	for &image_view in renderer.swap_chain_image_views {
 		framebuffer_create_info := vk.FramebufferCreateInfo {
@@ -567,7 +575,7 @@ deinit_renderer_framebuffers :: proc(renderer: Renderer) {
 }
 
 @(private="file")
-init_renderer_command_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
+init_renderer_command_buffers :: proc(renderer: ^Renderer) -> (ok := false) {
 	command_pool_create_info := vk.CommandPoolCreateInfo {
 		sType = .COMMAND_POOL_CREATE_INFO,
 		flags = { .RESET_COMMAND_BUFFER },
@@ -579,14 +587,16 @@ init_renderer_command_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 	}
 	defer if !ok do vk.DestroyCommandPool(renderer.device, renderer.command_pool, nil)
 
+	command_buffer_count := MAX_FRAMES_IN_FLIGHT
+	renderer.command_buffers = make([dynamic]vk.CommandBuffer, command_buffer_count)
+	defer if !ok do delete(renderer.command_buffers)
 	command_buffer_allocate_info := vk.CommandBufferAllocateInfo {
 		sType = .COMMAND_BUFFER_ALLOCATE_INFO,
 		commandPool = renderer.command_pool,
 		level = .PRIMARY,
-		commandBufferCount = 1,
+		commandBufferCount = cast(u32)len(renderer.command_buffers),
 	}
-
-	if vk.AllocateCommandBuffers(renderer.device, &command_buffer_allocate_info, &renderer.command_buffer) != .SUCCESS {
+	if vk.AllocateCommandBuffers(renderer.device, &command_buffer_allocate_info, raw_data(renderer.command_buffers)) != .SUCCESS {
 		return
 	}
 
@@ -595,29 +605,57 @@ init_renderer_command_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 }
 
 @(private="file")
-deinit_renderer_command_buffer :: proc(renderer: Renderer) {
+deinit_renderer_command_buffers :: proc(renderer: Renderer) {
+	delete(renderer.command_buffers)
 	vk.DestroyCommandPool(renderer.device, renderer.command_pool, nil)
 }
 
 @(private="file")
 init_renderer_synchronization_primitives :: proc(renderer: ^Renderer) -> (ok := false) {
 	semaphore_create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
-	if vk.CreateSemaphore(renderer.device, &semaphore_create_info, nil, &renderer.image_available_semaphore) != .SUCCESS {
-		return
-	}
-	defer if !ok do vk.DestroySemaphore(renderer.device, renderer.image_available_semaphore, nil)
 
-	if vk.CreateSemaphore(renderer.device, &semaphore_create_info, nil, &renderer.render_finished_semaphore) != .SUCCESS {
-		return
+	image_available_semaphore_count := MAX_FRAMES_IN_FLIGHT
+	renderer.image_available_semaphores = make([dynamic]vk.Semaphore, 0, image_available_semaphore_count)
+	defer if !ok {
+		destroy_semaphores(renderer.device, renderer.image_available_semaphores[:])
+		delete(renderer.image_available_semaphores)
 	}
-	defer if !ok do vk.DestroySemaphore(renderer.device, renderer.render_finished_semaphore, nil)
+	for i in 0..<image_available_semaphore_count {
+		semaphore: vk.Semaphore
+		if vk.CreateSemaphore(renderer.device, &semaphore_create_info, nil, &semaphore) != .SUCCESS do return
+		append(&renderer.image_available_semaphores, semaphore)
+	}
+	assert(len(renderer.image_available_semaphores) == MAX_FRAMES_IN_FLIGHT)
+
+	render_finished_semaphore_count := len(renderer.swap_chain_images)
+	renderer.render_finished_semaphores = make([dynamic]vk.Semaphore, 0, render_finished_semaphore_count)
+	defer if !ok {
+		destroy_semaphores(renderer.device, renderer.render_finished_semaphores[:])
+		delete(renderer.render_finished_semaphores)
+	}
+	for i in 0..<render_finished_semaphore_count {
+		semaphore: vk.Semaphore
+		if vk.CreateSemaphore(renderer.device, &semaphore_create_info, nil, &semaphore) != .SUCCESS do return
+		append(&renderer.render_finished_semaphores, semaphore)
+	}
+	assert(len(renderer.render_finished_semaphores) == len(renderer.swap_chain_images))
 
 	fence_create_info := vk.FenceCreateInfo {
 		sType = .FENCE_CREATE_INFO,
 		flags = { .SIGNALED },
 	}
-	if vk.CreateFence(renderer.device, &fence_create_info, nil, &renderer.in_flight_fence) != .SUCCESS do return
-	defer if !ok do vk.DestroyFence(renderer.device, renderer.in_flight_fence, nil)
+
+	fence_count := MAX_FRAMES_IN_FLIGHT
+	renderer.in_flight_fences = make([dynamic]vk.Fence, 0, fence_count)
+	defer if !ok {
+		destroy_fences(renderer.device, renderer.in_flight_fences[:])
+		delete(renderer.in_flight_fences)
+	}
+	for i in 0..<fence_count {
+		fence: vk.Fence
+		if vk.CreateFence(renderer.device, &fence_create_info, nil, &fence) != .SUCCESS do return
+		append(&renderer.in_flight_fences, fence)
+	}
 
 	ok = true
 	return
@@ -625,9 +663,12 @@ init_renderer_synchronization_primitives :: proc(renderer: ^Renderer) -> (ok := 
 
 @(private="file")
 deinit_renderer_synchronization_primitives :: proc(renderer: Renderer) {
-	vk.DestroySemaphore(renderer.device, renderer.image_available_semaphore, nil)
-	vk.DestroySemaphore(renderer.device, renderer.render_finished_semaphore, nil)
-	vk.DestroyFence(renderer.device, renderer.in_flight_fence, nil)
+	destroy_semaphores(renderer.device, renderer.image_available_semaphores[:])
+	delete(renderer.image_available_semaphores)
+	destroy_semaphores(renderer.device, renderer.render_finished_semaphores[:])
+	delete(renderer.render_finished_semaphores)
+	destroy_fences(renderer.device, renderer.in_flight_fences[:])
+	delete(renderer.in_flight_fences)
 }
 
 @(private="file")
@@ -754,6 +795,16 @@ destroy_framebuffers :: proc(device: vk.Device, framebuffers: []vk.Framebuffer) 
 }
 
 @(private="file")
+destroy_semaphores :: proc(device: vk.Device, semaphores: []vk.Semaphore) {
+	for semaphore in semaphores do vk.DestroySemaphore(device, semaphore, nil)
+}
+
+@(private="file")
+destroy_fences :: proc(device: vk.Device, fences: []vk.Fence) {
+	for fence in fences do vk.DestroyFence(device, fence, nil)
+}
+
+@(private="file")
 get_vk_debug_messenger_create_info :: proc() -> vk.DebugUtilsMessengerCreateInfoEXT {
 	return vk.DebugUtilsMessengerCreateInfoEXT {
 		sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -799,11 +850,12 @@ vk_debug_utils_messenger_callback :: proc "std" (message_severity: vk.DebugUtils
 
 @(private="file")
 renderer_record_command_buffer :: proc(renderer: Renderer,
+				       command_buffer: vk.CommandBuffer,
 				       swap_chain_image_index: u32) -> (ok := false) {
-	vk.ResetCommandBuffer(renderer.command_buffer, {})
+	vk.ResetCommandBuffer(command_buffer, {})
 
 	command_buffer_begin_info := vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO }
-	if vk.BeginCommandBuffer(renderer.command_buffer, &command_buffer_begin_info) != .SUCCESS do return
+	if vk.BeginCommandBuffer(command_buffer, &command_buffer_begin_info) != .SUCCESS do return
 
 	clear_color := vk.ClearValue { color = { float32 = { 0, 0, 0, 1 } } }
 	render_pass_begin_info := vk.RenderPassBeginInfo {
@@ -818,8 +870,8 @@ renderer_record_command_buffer :: proc(renderer: Renderer,
 		pClearValues = &clear_color,
 	}
 
-	vk.CmdBeginRenderPass(renderer.command_buffer, &render_pass_begin_info, .INLINE)
-	vk.CmdBindPipeline(renderer.command_buffer, .GRAPHICS, renderer.pipeline)
+	vk.CmdBeginRenderPass(command_buffer, &render_pass_begin_info, .INLINE)
+	vk.CmdBindPipeline(command_buffer, .GRAPHICS, renderer.pipeline)
 
 	viewport := vk.Viewport {
 		x = 0,
@@ -829,7 +881,7 @@ renderer_record_command_buffer :: proc(renderer: Renderer,
 		minDepth = 0,
 		maxDepth = 1,
 	}
-	vk.CmdSetViewport(commandBuffer = renderer.command_buffer,
+	vk.CmdSetViewport(commandBuffer = command_buffer,
 			  firstViewport = 0,
 			  viewportCount = 1,
 			  pViewports = &viewport)
@@ -838,20 +890,20 @@ renderer_record_command_buffer :: proc(renderer: Renderer,
 		offset = { 0, 0 },
 		extent = renderer.swap_chain_extent,
 	}
-	vk.CmdSetScissor(commandBuffer = renderer.command_buffer,
+	vk.CmdSetScissor(commandBuffer = command_buffer,
 			 firstScissor = 0,
 			 scissorCount = 1,
 			 pScissors = &scissor)
 
-	vk.CmdDraw(commandBuffer = renderer.command_buffer,
+	vk.CmdDraw(commandBuffer = command_buffer,
 		   vertexCount = 3,
 		   instanceCount = 1,
 		   firstVertex = 0,
 		   firstInstance = 0)
 
-	vk.CmdEndRenderPass(renderer.command_buffer)
+	vk.CmdEndRenderPass(command_buffer)
 
-	if vk.EndCommandBuffer(renderer.command_buffer) != .SUCCESS do return
+	if vk.EndCommandBuffer(command_buffer) != .SUCCESS do return
 
 	ok = true
 	return
@@ -860,33 +912,33 @@ renderer_record_command_buffer :: proc(renderer: Renderer,
 renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
 	vk.WaitForFences(device = renderer.device,
 			 fenceCount = 1,
-			 pFences = &renderer.in_flight_fence,
+			 pFences = &renderer.in_flight_fences[renderer.current_frame],
 			 waitAll = true,
 			 timeout = max(u64))
-	vk.ResetFences(renderer.device, 1, &renderer.in_flight_fence)
+	vk.ResetFences(renderer.device, 1, &renderer.in_flight_fences[renderer.current_frame])
 
 	swap_chain_image_index: u32
 	vk.AcquireNextImageKHR(device = renderer.device,
 			       swapchain = renderer.swap_chain,
 			       timeout = max(u64),
-			       semaphore = renderer.image_available_semaphore,
+			       semaphore = renderer.image_available_semaphores[renderer.current_frame],
 			       fence = vk.Fence(0),
 			       pImageIndex = &swap_chain_image_index)
 
-	renderer_record_command_buffer(renderer^, swap_chain_image_index)
+	renderer_record_command_buffer(renderer^, renderer.command_buffers[renderer.current_frame], swap_chain_image_index)
 
 	pipeline_waiting_stages := vk.PipelineStageFlags{ .TOP_OF_PIPE }
 	submit_info := vk.SubmitInfo {
 		sType = .SUBMIT_INFO,
 		waitSemaphoreCount = 1,
-		pWaitSemaphores = &renderer.image_available_semaphore,
+		pWaitSemaphores = &renderer.image_available_semaphores[renderer.current_frame],
 		pWaitDstStageMask = &pipeline_waiting_stages,
 		commandBufferCount = 1,
-		pCommandBuffers = &renderer.command_buffer,
+		pCommandBuffers = &renderer.command_buffers[renderer.current_frame],
 		signalSemaphoreCount = 1,
-		pSignalSemaphores = &renderer.render_finished_semaphore,
+		pSignalSemaphores = &renderer.render_finished_semaphores[swap_chain_image_index],
 	}
-	if vk.QueueSubmit(renderer.graphics_queue, 1, &submit_info, renderer.in_flight_fence) != .SUCCESS {
+	if vk.QueueSubmit(renderer.graphics_queue, 1, &submit_info, renderer.in_flight_fences[renderer.current_frame]) != .SUCCESS {
 		log.errorf("Failed to submit draw command buffer to the graphics queue.")
 		return
 	}
@@ -894,13 +946,16 @@ renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
 	presentation_info := vk.PresentInfoKHR {
 		sType = .PRESENT_INFO_KHR,
 		waitSemaphoreCount = 1,
-		pWaitSemaphores = &renderer.render_finished_semaphore,
+		pWaitSemaphores = &renderer.render_finished_semaphores[swap_chain_image_index],
 		swapchainCount = 1,
 		pSwapchains = &renderer.swap_chain,
 		pImageIndices = &swap_chain_image_index,
 	}
 
 	vk.QueuePresentKHR(renderer.presentation_queue, &presentation_info)
+
+	renderer.current_frame += 1
+	renderer.current_frame %= MAX_FRAMES_IN_FLIGHT
 
 	ok = true
 	return
