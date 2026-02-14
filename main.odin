@@ -16,6 +16,13 @@ glfw_error_callback :: proc "c" (error_code: i32, description: cstring) {
 	log.errorf("GLFW Error: %v", description)
 }
 
+glfw_framebuffer_size_callback :: proc "c" (window: glfw.WindowHandle, width, height: i32) {
+	context = g_context
+	renderer := cast(^Renderer)glfw.GetWindowUserPointer(window)
+	assert(renderer != nil)
+	renderer.should_recreate_swap_chain = true
+}
+
 glfw_key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods: i32) {
 	if key == glfw.KEY_ESCAPE && action == glfw.PRESS do glfw.SetWindowShouldClose(window, true)
 }
@@ -53,21 +60,22 @@ main :: proc() {
 	defer glfw.Terminate()
 
 	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
-	glfw.WindowHint(glfw.RESIZABLE, glfw.FALSE)
 
 	window := glfw.CreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, APPLICATION_NAME, nil, nil)
 	if window == nil do log.panic("Failed to create a window!")
 	defer glfw.DestroyWindow(window)
 
-	glfw.SetKeyCallback(window, glfw_key_callback)
-
 	renderer: Renderer
 	if !init_renderer(&renderer, "Renderer", window) do log.panic("Failed to initialize the renderer!")
 	defer deinit_renderer(renderer)
 
+	glfw.SetWindowUserPointer(window, &renderer)
+	glfw.SetFramebufferSizeCallback(window, glfw_framebuffer_size_callback)
+	glfw.SetKeyCallback(window, glfw_key_callback)
+
 	for !glfw.WindowShouldClose(window) {
 		glfw.PollEvents()
-		renderer_render(&renderer)
+		if !renderer_render(&renderer) do break
 		free_all(context.temp_allocator)
 	}
 }

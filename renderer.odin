@@ -5,14 +5,15 @@ import "vendor:glfw"
 
 import "core:log"
 
-@(rodata)
-vertex_shader_bytecode := #load("shader_vert.spv")
-@(rodata)
-fragment_shader_bytecode := #load("shader_frag.spv")
+@(rodata) vertex_shader_bytecode := #load("shader_vert.spv")
+@(rodata) fragment_shader_bytecode := #load("shader_frag.spv")
 
 MAX_FRAMES_IN_FLIGHT :: 2
 
 Renderer :: struct {
+	window: glfw.WindowHandle,
+	should_recreate_swap_chain: bool,
+
 	instance: vk.Instance,
 	debug_utils_messenger: vk.DebugUtilsMessengerEXT,
 
@@ -55,6 +56,7 @@ Swap_Chain_Properties :: struct {
 init_renderer :: proc(renderer: ^Renderer,
 		      application_name: cstring,
 		      window: glfw.WindowHandle) -> (ok := false) {
+	renderer.window = window
 	vk.load_proc_addresses_global(rawptr(glfw.GetInstanceProcAddress))
 	assert(vk.CreateInstance != nil, "Vulkan function pointers not loaded")
 
@@ -67,9 +69,9 @@ init_renderer :: proc(renderer: ^Renderer,
 
 	init_renderer_instance(renderer, application_name, layers[:], instance_extensions[:]) or_return
 	defer if !ok do deinit_renderer_instance(renderer^)
-	swap_chain_properties := init_renderer_device(renderer, window, layers[:], device_extensions[:]) or_return
+	init_renderer_device(renderer, layers[:], device_extensions[:]) or_return
 	defer if !ok do deinit_renderer_device(renderer^)
-	init_renderer_swap_chain(renderer, swap_chain_properties) or_return
+	init_renderer_swap_chain(renderer) or_return
 	defer if !ok do deinit_renderer_swap_chain(renderer^)
 	init_renderer_render_pass(renderer) or_return
 	defer if !ok do deinit_renderer_render_pass(renderer^)
@@ -88,7 +90,6 @@ init_renderer :: proc(renderer: ^Renderer,
 
 deinit_renderer :: proc(renderer: Renderer) {
 	vk.DeviceWaitIdle(renderer.device)
-
 	deinit_renderer_synchronization_primitives(renderer)
 	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_framebuffers(renderer)
@@ -173,10 +174,9 @@ deinit_renderer_instance :: proc(renderer: Renderer) {
 
 @(private="file")
 init_renderer_device :: proc(renderer: ^Renderer,
-			     window: glfw.WindowHandle,
 			     layers: []cstring,
-			     extensions: []cstring) -> (swap_chain_properties: Swap_Chain_Properties, ok := false) {
-	if glfw.CreateWindowSurface(renderer.instance, window, nil, &renderer.surface) != .SUCCESS do return
+			     extensions: []cstring) -> (ok := false) {
+	if glfw.CreateWindowSurface(renderer.instance, renderer.window, nil, &renderer.surface) != .SUCCESS do return
 	defer if !ok do vk.DestroySurfaceKHR(renderer.instance, renderer.surface, nil)
 
 	physical_device_count: u32
@@ -188,12 +188,7 @@ init_renderer_device :: proc(renderer: ^Renderer,
 
 	suitable_physical_device_found := false
 	for &device in physical_devices {
-		device_suitable := false
-		swap_chain_properties, device_suitable = try_physical_device(device,
-									     extensions,
-									     window,
-									     renderer.surface)
-		if device_suitable {
+		if device_suitable(device, extensions, renderer.window, renderer.surface) {
 			renderer.physical_device = device
 			suitable_physical_device_found = true
 			break
@@ -278,8 +273,15 @@ deinit_renderer_device :: proc(renderer: Renderer) {
 }
 
 @(private="file")
-init_renderer_swap_chain :: proc(renderer: ^Renderer,
-				 swap_chain_properties: Swap_Chain_Properties) -> (ok := false) {
+init_renderer_swap_chain :: proc(renderer: ^Renderer) -> (ok := false) {
+	swap_chain_properties, swap_chain_properties_ok := get_swap_chain_properties(renderer.window,
+										     renderer.surface,
+										     renderer.physical_device)
+	if !swap_chain_properties_ok {
+		log.errorf("Failed to recreate the swapchain!")
+		return
+	}
+
 	swap_chain_min_image_count := swap_chain_properties.surface_capabilities.minImageCount
 	swap_chain_max_image_count := swap_chain_properties.surface_capabilities.maxImageCount
 	wanted_swap_chain_image_count := swap_chain_min_image_count + 1
@@ -596,7 +598,9 @@ init_renderer_command_buffers :: proc(renderer: ^Renderer) -> (ok := false) {
 		level = .PRIMARY,
 		commandBufferCount = cast(u32)len(renderer.command_buffers),
 	}
-	if vk.AllocateCommandBuffers(renderer.device, &command_buffer_allocate_info, raw_data(renderer.command_buffers)) != .SUCCESS {
+	if vk.AllocateCommandBuffers(renderer.device,
+				     &command_buffer_allocate_info,
+				     raw_data(renderer.command_buffers)) != .SUCCESS {
 		return
 	}
 
@@ -675,6 +679,7 @@ deinit_renderer_synchronization_primitives :: proc(renderer: Renderer) {
 get_vulkan_layers :: proc() -> [dynamic]cstring {
 	layers := make([dynamic]cstring)
 	when ODIN_DEBUG { append(&layers, "VK_LAYER_KHRONOS_validation") }
+	shrink(&layers)
 	return layers
 }
 
@@ -684,6 +689,7 @@ get_vulkan_instance_extensions :: proc() -> [dynamic]cstring {
 	glfw_required_extensions := glfw.GetRequiredInstanceExtensions()
 	append(&extensions, ..glfw_required_extensions[:])
 	when ODIN_DEBUG { append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME) }
+	shrink(&extensions)
 	return extensions
 }
 
@@ -691,39 +697,15 @@ get_vulkan_instance_extensions :: proc() -> [dynamic]cstring {
 get_vulkan_device_extensions :: proc() -> [dynamic]cstring {
 	extensions := make([dynamic]cstring)
 	append(&extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
+	shrink(&extensions)
 	return extensions
 }
 
 @(private="file")
-try_physical_device :: proc(physical_device: vk.PhysicalDevice,
-			    required_device_extensions: []cstring,
-			    window: glfw.WindowHandle,
-			    surface: vk.SurfaceKHR) -> (swap_chain_properties: Swap_Chain_Properties, ok := false) {
-	device_properties: vk.PhysicalDeviceProperties
-	vk.GetPhysicalDeviceProperties(physical_device, &device_properties)
-	if device_properties.deviceType != .DISCRETE_GPU do return
-
-	device_extension_count: u32
-	vk.EnumerateDeviceExtensionProperties(physical_device, nil, &device_extension_count, nil)
-	device_extensions := make([dynamic]vk.ExtensionProperties, device_extension_count)
-	defer delete(device_extensions)
-	vk.EnumerateDeviceExtensionProperties(physical_device, nil, &device_extension_count, raw_data(device_extensions))
-
-	for required_extension in required_device_extensions {
-		required_extension_found := false
-
-		for &device_extension in device_extensions {
-			if required_extension == cast(cstring)raw_data(&device_extension.extensionName) {
-				required_extension_found = true
-				break
-			}
-		}
-
-		if !required_extension_found do return
-	}
-
-	vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &swap_chain_properties.surface_capabilities)
-
+get_swap_chain_properties :: proc(window: glfw.WindowHandle,
+				  surface: vk.SurfaceKHR,
+				  physical_device: vk.PhysicalDevice) -> (swap_chain_properties: Swap_Chain_Properties,
+									  ok := false) {
 	surface_format_count: u32
 	vk.GetPhysicalDeviceSurfaceFormatsKHR(physical_device,
 					      surface,
@@ -749,6 +731,8 @@ try_physical_device :: proc(physical_device: vk.PhysicalDevice,
 						   raw_data(presentation_modes))
 
 	if len(surface_formats) == 0 || len(presentation_modes) == 0 do return
+
+	vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &swap_chain_properties.surface_capabilities)
 
 	swap_chain_properties.surface_format = surface_formats[0]
 	for &format in surface_formats {
@@ -782,6 +766,51 @@ try_physical_device :: proc(physical_device: vk.PhysicalDevice,
 
 	ok = true
 	return
+}
+
+@(private="file")
+device_suitable :: proc(physical_device: vk.PhysicalDevice,
+			required_device_extensions: []cstring,
+			window: glfw.WindowHandle,
+			surface: vk.SurfaceKHR) -> (ok := false) {
+	device_properties: vk.PhysicalDeviceProperties
+	vk.GetPhysicalDeviceProperties(physical_device, &device_properties)
+	if device_properties.deviceType != .DISCRETE_GPU do return
+
+	device_extension_count: u32
+	vk.EnumerateDeviceExtensionProperties(physical_device, nil, &device_extension_count, nil)
+	device_extensions := make([dynamic]vk.ExtensionProperties, device_extension_count)
+	defer delete(device_extensions)
+	vk.EnumerateDeviceExtensionProperties(physical_device, nil, &device_extension_count, raw_data(device_extensions))
+
+	for required_extension in required_device_extensions {
+		required_extension_found := false
+		for &device_extension in device_extensions {
+			if required_extension == cast(cstring)raw_data(&device_extension.extensionName) {
+				required_extension_found = true
+				break
+			}
+		}
+		if !required_extension_found do return
+	}
+
+	ok = true
+	return
+}
+
+@(private="file")
+recreate_swap_chain :: proc(renderer: ^Renderer) {
+	width, height := glfw.GetFramebufferSize(renderer.window)
+	for width == 0 || height == 0 {
+		glfw.WaitEvents()
+		width, height = glfw.GetFramebufferSize(renderer.window)
+	}
+	renderer.should_recreate_swap_chain = false
+	vk.DeviceWaitIdle(renderer.device)
+	deinit_renderer_framebuffers(renderer^)
+	deinit_renderer_swap_chain(renderer^)
+	init_renderer_swap_chain(renderer)
+	init_renderer_framebuffers(renderer)
 }
 
 @(private="file")
@@ -915,17 +944,27 @@ renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
 			 pFences = &renderer.in_flight_fences[renderer.current_frame],
 			 waitAll = true,
 			 timeout = max(u64))
-	vk.ResetFences(renderer.device, 1, &renderer.in_flight_fences[renderer.current_frame])
 
 	swap_chain_image_index: u32
-	vk.AcquireNextImageKHR(device = renderer.device,
-			       swapchain = renderer.swap_chain,
-			       timeout = max(u64),
-			       semaphore = renderer.image_available_semaphores[renderer.current_frame],
-			       fence = vk.Fence(0),
-			       pImageIndex = &swap_chain_image_index)
+	next_image_result := vk.AcquireNextImageKHR(device = renderer.device,
+						    swapchain = renderer.swap_chain,
+						    timeout = max(u64),
+						    semaphore = renderer.image_available_semaphores[renderer.current_frame],
+						    fence = vk.Fence(0),
+						    pImageIndex = &swap_chain_image_index)
+	if next_image_result == .ERROR_OUT_OF_DATE_KHR {
+		recreate_swap_chain(renderer)
+		ok = true
+		return
+	} else if next_image_result != .SUCCESS && next_image_result != .SUBOPTIMAL_KHR {
+		log.errorf("Failed to acquire an image from the swapchain!")
+		return
+	}
 
-	renderer_record_command_buffer(renderer^, renderer.command_buffers[renderer.current_frame], swap_chain_image_index)
+	vk.ResetFences(renderer.device, 1, &renderer.in_flight_fences[renderer.current_frame])
+	renderer_record_command_buffer(renderer^,
+				       renderer.command_buffers[renderer.current_frame],
+				       swap_chain_image_index)
 
 	pipeline_waiting_stages := vk.PipelineStageFlags{ .TOP_OF_PIPE }
 	submit_info := vk.SubmitInfo {
@@ -938,7 +977,10 @@ renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
 		signalSemaphoreCount = 1,
 		pSignalSemaphores = &renderer.render_finished_semaphores[swap_chain_image_index],
 	}
-	if vk.QueueSubmit(renderer.graphics_queue, 1, &submit_info, renderer.in_flight_fences[renderer.current_frame]) != .SUCCESS {
+	if vk.QueueSubmit(renderer.graphics_queue,
+			  1,
+			  &submit_info,
+			  renderer.in_flight_fences[renderer.current_frame]) != .SUCCESS {
 		log.errorf("Failed to submit draw command buffer to the graphics queue.")
 		return
 	}
@@ -952,10 +994,16 @@ renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
 		pImageIndices = &swap_chain_image_index,
 	}
 
-	vk.QueuePresentKHR(renderer.presentation_queue, &presentation_info)
+	present_result := vk.QueuePresentKHR(renderer.presentation_queue, &presentation_info)
 
-	renderer.current_frame += 1
-	renderer.current_frame %= MAX_FRAMES_IN_FLIGHT
+	if present_result == .ERROR_OUT_OF_DATE_KHR || present_result == .SUBOPTIMAL_KHR || renderer.should_recreate_swap_chain {
+		recreate_swap_chain(renderer)
+	} else if present_result != .SUCCESS {
+		log.errorf("Failed to present swapchain image!")
+		return
+	}
+
+	renderer.current_frame = (renderer.current_frame + 1) % MAX_FRAMES_IN_FLIGHT
 
 	ok = true
 	return
