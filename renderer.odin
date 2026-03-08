@@ -4,9 +4,52 @@ import vk "vendor:vulkan"
 import "vendor:glfw"
 
 import "core:log"
+import "core:slice"
+import "core:mem"
 
 @(rodata) vertex_shader_bytecode := #load("shader_vert.spv")
 @(rodata) fragment_shader_bytecode := #load("shader_frag.spv")
+
+Vec2 :: [2]f32
+Vec3 :: [3]f32
+Vec4 :: [4]f32
+
+Vertex :: struct {
+	position: Vec2,
+	color: Vec3,
+}
+
+@(rodata)
+triangle_vertices := []Vertex{
+	{ {  0.0, -0.5 }, { 1, 0, 0 } },
+	{ {  0.5,  0.5 }, { 0, 1, 0 } },
+	{ { -0.5,  0.5 }, { 0, 0, 1 } },
+}
+
+get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
+	return vk.VertexInputBindingDescription{
+		binding = 0,
+		stride = size_of(Vertex),
+		inputRate = .VERTEX,
+	}
+}
+
+get_vertex_attribute_descriptions :: proc() -> [2]vk.VertexInputAttributeDescription {
+	return [2]vk.VertexInputAttributeDescription{
+		vk.VertexInputAttributeDescription{
+			binding = 0,
+			location = 0,
+			format = .R32G32_SFLOAT,
+			offset = cast(u32)offset_of(Vertex, position),
+		},
+		vk.VertexInputAttributeDescription{
+			binding = 0,
+			location = 1,
+			format = .R32G32B32_SFLOAT,
+			offset = cast(u32)offset_of(Vertex, color),
+		},
+	}
+}
 
 MAX_FRAMES_IN_FLIGHT :: 2
 
@@ -35,6 +78,9 @@ Renderer :: struct {
 	pipeline_layout: vk.PipelineLayout,
 	pipeline: vk.Pipeline,
 	framebuffers: [dynamic]vk.Framebuffer,
+
+	vertex_buffer: vk.Buffer,
+	vertex_buffer_memory: vk.DeviceMemory,
 
 	command_pool: vk.CommandPool,
 	command_buffers: [dynamic]vk.CommandBuffer,
@@ -79,6 +125,8 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
 	init_renderer_framebuffers(renderer) or_return
 	defer if !ok do deinit_renderer_framebuffers(renderer^)
+	init_renderer_vertex_buffer(renderer) or_return
+	defer if !ok do deinit_renderer_vertex_buffer(renderer^)
 	init_renderer_command_buffers(renderer) or_return
 	defer if !ok do deinit_renderer_command_buffers(renderer^)
 	init_renderer_synchronization_primitives(renderer) or_return
@@ -92,6 +140,7 @@ deinit_renderer :: proc(renderer: Renderer) {
 	vk.DeviceWaitIdle(renderer.device)
 	deinit_renderer_synchronization_primitives(renderer)
 	deinit_renderer_command_buffers(renderer)
+	deinit_renderer_vertex_buffer(renderer)
 	deinit_renderer_framebuffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
 	deinit_renderer_render_pass(renderer)
@@ -431,12 +480,15 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 		},
 	}
 
+	vertex_binding_description := get_vertex_binding_description()
+	vertex_attribute_descriptions := get_vertex_attribute_descriptions()
+
 	pipeline_vertex_input_state_create_info := vk.PipelineVertexInputStateCreateInfo {
 		sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-		vertexBindingDescriptionCount = 0,
-		pVertexBindingDescriptions = nil,
-		vertexAttributeDescriptionCount = 0,
-		pVertexAttributeDescriptions = nil,
+		vertexBindingDescriptionCount = 1,
+		pVertexBindingDescriptions = &vertex_binding_description,
+		vertexAttributeDescriptionCount = len(vertex_attribute_descriptions),
+		pVertexAttributeDescriptions = raw_data(&vertex_attribute_descriptions),
 	}
 
 	pipeline_input_assembly_state_create_info := vk.PipelineInputAssemblyStateCreateInfo {
@@ -574,6 +626,56 @@ init_renderer_framebuffers :: proc(renderer: ^Renderer) -> (ok := false) {
 deinit_renderer_framebuffers :: proc(renderer: Renderer) {
 	destroy_framebuffers(renderer.device, renderer.framebuffers[:])
 	delete(renderer.framebuffers)
+}
+
+@(private="file")
+init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
+	vertices_data_size := slice.size(triangle_vertices)
+
+	vertex_buffer_create_info := vk.BufferCreateInfo{
+		sType = .BUFFER_CREATE_INFO,
+		size = cast(vk.DeviceSize)vertices_data_size,
+		usage = { .VERTEX_BUFFER },
+		sharingMode = .EXCLUSIVE,
+	}
+
+	if vk.CreateBuffer(renderer.device, &vertex_buffer_create_info, nil, &renderer.vertex_buffer) != .SUCCESS do return
+	defer if !ok do vk.DestroyBuffer(renderer.device, renderer.vertex_buffer, nil)
+
+	vertex_buffer_memory_requirements: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(renderer.device, renderer.vertex_buffer, &vertex_buffer_memory_requirements)
+
+	memory_allocate_info := vk.MemoryAllocateInfo{
+		sType = .MEMORY_ALLOCATE_INFO,
+		allocationSize = vertex_buffer_memory_requirements.size,
+		memoryTypeIndex = find_memory_type(renderer.physical_device,
+						   vertex_buffer_memory_requirements.memoryTypeBits,
+						   { .HOST_VISIBLE, .HOST_COHERENT }) or_return,
+	}
+
+	if vk.AllocateMemory(renderer.device, &memory_allocate_info, nil, &renderer.vertex_buffer_memory) != .SUCCESS do return
+	defer if !ok do vk.FreeMemory(renderer.device, renderer.vertex_buffer_memory, nil)
+
+	if vk.BindBufferMemory(renderer.device, renderer.vertex_buffer, renderer.vertex_buffer_memory, 0) != .SUCCESS do return
+
+	buffer_data: rawptr
+	vk.MapMemory(device = renderer.device,
+		     memory = renderer.vertex_buffer_memory,
+		     offset = 0,
+		     size = cast(vk.DeviceSize)vertices_data_size,
+		     flags = {},
+		     ppData = &buffer_data)
+	mem.copy(buffer_data, raw_data(triangle_vertices), vertices_data_size)
+	vk.UnmapMemory(renderer.device, renderer.vertex_buffer_memory)
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_vertex_buffer :: proc(renderer: Renderer) {
+	vk.DestroyBuffer(renderer.device, renderer.vertex_buffer, nil)
+	vk.FreeMemory(renderer.device, renderer.vertex_buffer_memory, nil)
 }
 
 @(private="file")
@@ -814,6 +916,21 @@ recreate_swap_chain :: proc(renderer: ^Renderer) {
 }
 
 @(private="file")
+find_memory_type :: proc(device: vk.PhysicalDevice, type_bits: u32, properties: vk.MemoryPropertyFlags) -> (u32, bool) {
+	memory_properties: vk.PhysicalDeviceMemoryProperties
+	vk.GetPhysicalDeviceMemoryProperties(device, &memory_properties)
+	memory_types := memory_properties.memoryTypes[:memory_properties.memoryTypeCount]
+
+	for memory_type, i in memory_types {
+		if type_bits & (1 << u32(i)) != 0 && (properties <= memory_type.propertyFlags) {
+			return u32(i), true
+		}
+	}
+
+	return max(u32), false
+}
+
+@(private="file")
 destroy_image_views :: proc(device: vk.Device, image_views: []vk.ImageView) {
 	for image_view in image_views do vk.DestroyImageView(device, image_view, nil)
 }
@@ -924,8 +1041,16 @@ renderer_record_command_buffer :: proc(renderer: Renderer,
 			 scissorCount = 1,
 			 pScissors = &scissor)
 
+	vertex_buffers := [?]vk.Buffer{ renderer.vertex_buffer }
+	offsets := [?]vk.DeviceSize{ 0 }
+	vk.CmdBindVertexBuffers(commandBuffer = command_buffer,
+				firstBinding = 0,
+				bindingCount = 1,
+				pBuffers = raw_data(&vertex_buffers),
+				pOffsets = raw_data(&offsets))
+
 	vk.CmdDraw(commandBuffer = command_buffer,
-		   vertexCount = 3,
+		   vertexCount = cast(u32)len(triangle_vertices),
 		   instanceCount = 1,
 		   firstVertex = 0,
 		   firstInstance = 0)
