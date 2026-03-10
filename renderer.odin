@@ -79,11 +79,11 @@ Renderer :: struct {
 	pipeline: vk.Pipeline,
 	framebuffers: [dynamic]vk.Framebuffer,
 
-	vertex_buffer: vk.Buffer,
-	vertex_buffer_memory: vk.DeviceMemory,
-
 	command_pool: vk.CommandPool,
 	command_buffers: [dynamic]vk.CommandBuffer,
+
+	vertex_buffer: vk.Buffer,
+	vertex_buffer_memory: vk.DeviceMemory,
 
 	image_available_semaphores: [dynamic]vk.Semaphore,
 	render_finished_semaphores: [dynamic]vk.Semaphore,
@@ -125,10 +125,10 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
 	init_renderer_framebuffers(renderer) or_return
 	defer if !ok do deinit_renderer_framebuffers(renderer^)
-	init_renderer_vertex_buffer(renderer) or_return
-	defer if !ok do deinit_renderer_vertex_buffer(renderer^)
 	init_renderer_command_buffers(renderer) or_return
 	defer if !ok do deinit_renderer_command_buffers(renderer^)
+	init_renderer_vertex_buffer(renderer) or_return
+	defer if !ok do deinit_renderer_vertex_buffer(renderer^)
 	init_renderer_synchronization_primitives(renderer) or_return
 	defer if !ok do deinit_renderer_synchronization_primitives(renderer^)
 
@@ -139,8 +139,8 @@ init_renderer :: proc(renderer: ^Renderer,
 deinit_renderer :: proc(renderer: Renderer) {
 	vk.DeviceWaitIdle(renderer.device)
 	deinit_renderer_synchronization_primitives(renderer)
-	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_vertex_buffer(renderer)
+	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_framebuffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
 	deinit_renderer_render_pass(renderer)
@@ -630,43 +630,38 @@ deinit_renderer_framebuffers :: proc(renderer: Renderer) {
 
 @(private="file")
 init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
-	vertices_data_size := slice.size(triangle_vertices)
+	buffer_size := slice.size(triangle_vertices)
 
-	vertex_buffer_create_info := vk.BufferCreateInfo{
-		sType = .BUFFER_CREATE_INFO,
-		size = cast(vk.DeviceSize)vertices_data_size,
-		usage = { .VERTEX_BUFFER },
-		sharingMode = .EXCLUSIVE,
-	}
-
-	if vk.CreateBuffer(renderer.device, &vertex_buffer_create_info, nil, &renderer.vertex_buffer) != .SUCCESS do return
-	defer if !ok do vk.DestroyBuffer(renderer.device, renderer.vertex_buffer, nil)
-
-	vertex_buffer_memory_requirements: vk.MemoryRequirements
-	vk.GetBufferMemoryRequirements(renderer.device, renderer.vertex_buffer, &vertex_buffer_memory_requirements)
-
-	memory_allocate_info := vk.MemoryAllocateInfo{
-		sType = .MEMORY_ALLOCATE_INFO,
-		allocationSize = vertex_buffer_memory_requirements.size,
-		memoryTypeIndex = find_memory_type(renderer.physical_device,
-						   vertex_buffer_memory_requirements.memoryTypeBits,
-						   { .HOST_VISIBLE, .HOST_COHERENT }) or_return,
-	}
-
-	if vk.AllocateMemory(renderer.device, &memory_allocate_info, nil, &renderer.vertex_buffer_memory) != .SUCCESS do return
-	defer if !ok do vk.FreeMemory(renderer.device, renderer.vertex_buffer_memory, nil)
-
-	if vk.BindBufferMemory(renderer.device, renderer.vertex_buffer, renderer.vertex_buffer_memory, 0) != .SUCCESS do return
+	staging_buffer, staging_buffer_memory := create_buffer(renderer.physical_device,
+							       renderer.device,
+							       cast(vk.DeviceSize)buffer_size,
+							       { .TRANSFER_SRC },
+							       { .HOST_VISIBLE, .HOST_COHERENT }) or_return
+	defer destroy_buffer(renderer.device, staging_buffer, staging_buffer_memory)
 
 	buffer_data: rawptr
 	vk.MapMemory(device = renderer.device,
-		     memory = renderer.vertex_buffer_memory,
+		     memory = staging_buffer_memory,
 		     offset = 0,
-		     size = cast(vk.DeviceSize)vertices_data_size,
+		     size = cast(vk.DeviceSize)buffer_size,
 		     flags = {},
 		     ppData = &buffer_data)
-	mem.copy(buffer_data, raw_data(triangle_vertices), vertices_data_size)
-	vk.UnmapMemory(renderer.device, renderer.vertex_buffer_memory)
+	mem.copy(buffer_data, raw_data(triangle_vertices), buffer_size)
+	vk.UnmapMemory(renderer.device, staging_buffer_memory)
+
+	renderer.vertex_buffer, renderer.vertex_buffer_memory = create_buffer(renderer.physical_device,
+									      renderer.device,
+									      cast(vk.DeviceSize)buffer_size,
+									      { .VERTEX_BUFFER, .TRANSFER_DST },
+									      { .DEVICE_LOCAL }) or_return
+	defer if !ok do destroy_buffer(renderer.device, renderer.vertex_buffer, renderer.vertex_buffer_memory)
+
+	copy_buffer(renderer.device,
+		    renderer.command_pool,
+		    renderer.graphics_queue,
+		    staging_buffer,
+		    renderer.vertex_buffer,
+		    cast(vk.DeviceSize)buffer_size)
 
 	ok = true
 	return
@@ -674,8 +669,7 @@ init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 
 @(private="file")
 deinit_renderer_vertex_buffer :: proc(renderer: Renderer) {
-	vk.DestroyBuffer(renderer.device, renderer.vertex_buffer, nil)
-	vk.FreeMemory(renderer.device, renderer.vertex_buffer_memory, nil)
+	destroy_buffer(renderer.device, renderer.vertex_buffer, renderer.vertex_buffer_memory)
 }
 
 @(private="file")
@@ -913,21 +907,6 @@ recreate_swap_chain :: proc(renderer: ^Renderer) {
 	deinit_renderer_swap_chain(renderer^)
 	init_renderer_swap_chain(renderer)
 	init_renderer_framebuffers(renderer)
-}
-
-@(private="file")
-find_memory_type :: proc(device: vk.PhysicalDevice, type_bits: u32, properties: vk.MemoryPropertyFlags) -> (u32, bool) {
-	memory_properties: vk.PhysicalDeviceMemoryProperties
-	vk.GetPhysicalDeviceMemoryProperties(device, &memory_properties)
-	memory_types := memory_properties.memoryTypes[:memory_properties.memoryTypeCount]
-
-	for memory_type, i in memory_types {
-		if type_bits & (1 << u32(i)) != 0 && (properties <= memory_type.propertyFlags) {
-			return u32(i), true
-		}
-	}
-
-	return max(u32), false
 }
 
 @(private="file")
