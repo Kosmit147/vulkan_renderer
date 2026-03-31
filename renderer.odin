@@ -970,7 +970,7 @@ vk_debug_utils_messenger_callback :: proc "std" (message_severity: vk.DebugUtils
 		log.errorf("Vulkan %v: %v", type_string, callback_data.pMessage)
 	}
 
-	return b32(vk.FALSE)
+	return false
 }
 
 @(private="file")
