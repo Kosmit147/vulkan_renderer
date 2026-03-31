@@ -20,11 +20,15 @@ Vertex :: struct {
 }
 
 @(rodata)
-triangle_vertices := []Vertex{
-	{ {  0.0, -0.5 }, { 1, 0, 0 } },
-	{ {  0.5,  0.5 }, { 0, 1, 0 } },
-	{ { -0.5,  0.5 }, { 0, 0, 1 } },
+rectangle_vertices := []Vertex{
+	{ { -0.5, -0.5 }, { 1, 0, 0 } },
+	{ {  0.5, -0.5 }, { 0, 1, 0 } },
+	{ {  0.5,  0.5 }, { 0, 0, 1 } },
+	{ { -0.5,  0.5 }, { 1, 1, 1 } },
 }
+
+@(rodata)
+rectangle_indices := []u16{ 0, 1, 2, 2, 3, 0 }
 
 get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
 	return vk.VertexInputBindingDescription{
@@ -84,6 +88,8 @@ Renderer :: struct {
 
 	vertex_buffer: vk.Buffer,
 	vertex_buffer_memory: vk.DeviceMemory,
+	index_buffer: vk.Buffer,
+	index_buffer_memory: vk.DeviceMemory,
 
 	image_available_semaphores: [dynamic]vk.Semaphore,
 	render_finished_semaphores: [dynamic]vk.Semaphore,
@@ -129,6 +135,8 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_command_buffers(renderer^)
 	init_renderer_vertex_buffer(renderer) or_return
 	defer if !ok do deinit_renderer_vertex_buffer(renderer^)
+	init_renderer_index_buffer(renderer) or_return
+	defer if !ok do deinit_renderer_index_buffer(renderer^)
 	init_renderer_synchronization_primitives(renderer) or_return
 	defer if !ok do deinit_renderer_synchronization_primitives(renderer^)
 
@@ -139,6 +147,7 @@ init_renderer :: proc(renderer: ^Renderer,
 deinit_renderer :: proc(renderer: Renderer) {
 	vk.DeviceWaitIdle(renderer.device)
 	deinit_renderer_synchronization_primitives(renderer)
+	deinit_renderer_index_buffer(renderer)
 	deinit_renderer_vertex_buffer(renderer)
 	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_framebuffers(renderer)
@@ -630,7 +639,7 @@ deinit_renderer_framebuffers :: proc(renderer: Renderer) {
 
 @(private="file")
 init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
-	buffer_size := slice.size(triangle_vertices)
+	buffer_size := slice.size(rectangle_vertices)
 
 	staging_buffer, staging_buffer_memory := create_buffer(renderer.physical_device,
 							       renderer.device,
@@ -646,7 +655,7 @@ init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 		     size = cast(vk.DeviceSize)buffer_size,
 		     flags = {},
 		     ppData = &buffer_data)
-	mem.copy(buffer_data, raw_data(triangle_vertices), buffer_size)
+	mem.copy(buffer_data, raw_data(rectangle_vertices), buffer_size)
 	vk.UnmapMemory(renderer.device, staging_buffer_memory)
 
 	renderer.vertex_buffer, renderer.vertex_buffer_memory = create_buffer(renderer.physical_device,
@@ -670,6 +679,50 @@ init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 @(private="file")
 deinit_renderer_vertex_buffer :: proc(renderer: Renderer) {
 	destroy_buffer(renderer.device, renderer.vertex_buffer, renderer.vertex_buffer_memory)
+}
+
+@(private="file")
+init_renderer_index_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
+	buffer_size := slice.size(rectangle_indices)
+
+	staging_buffer, staging_buffer_memory := create_buffer(renderer.physical_device,
+							       renderer.device,
+							       cast(vk.DeviceSize)buffer_size,
+							       { .TRANSFER_SRC },
+							       { .HOST_VISIBLE, .HOST_COHERENT }) or_return
+	defer destroy_buffer(renderer.device, staging_buffer, staging_buffer_memory)
+
+	buffer_data: rawptr
+	vk.MapMemory(device = renderer.device,
+		     memory = staging_buffer_memory,
+		     offset = 0,
+		     size = cast(vk.DeviceSize)buffer_size,
+		     flags = {},
+		     ppData = &buffer_data)
+	mem.copy(buffer_data, raw_data(rectangle_indices), buffer_size)
+	vk.UnmapMemory(renderer.device, staging_buffer_memory)
+
+	renderer.index_buffer, renderer.index_buffer_memory = create_buffer(renderer.physical_device,
+									    renderer.device,
+									    cast(vk.DeviceSize)buffer_size,
+									    { .INDEX_BUFFER, .TRANSFER_DST },
+									    { .DEVICE_LOCAL }) or_return
+	defer if !ok do destroy_buffer(renderer.device, renderer.index_buffer, renderer.index_buffer_memory)
+
+	copy_buffer(renderer.device,
+		    renderer.command_pool,
+		    renderer.graphics_queue,
+		    staging_buffer,
+		    renderer.index_buffer,
+		    cast(vk.DeviceSize)buffer_size)
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_index_buffer :: proc(renderer: Renderer) {
+	destroy_buffer(renderer.device, renderer.index_buffer, renderer.index_buffer_memory)
 }
 
 @(private="file")
@@ -1027,12 +1080,17 @@ renderer_record_command_buffer :: proc(renderer: Renderer,
 				bindingCount = 1,
 				pBuffers = raw_data(&vertex_buffers),
 				pOffsets = raw_data(&offsets))
+	vk.CmdBindIndexBuffer(commandBuffer = command_buffer,
+			      buffer = renderer.index_buffer,
+			      offset = 0,
+			      indexType = .UINT16)
 
-	vk.CmdDraw(commandBuffer = command_buffer,
-		   vertexCount = cast(u32)len(triangle_vertices),
-		   instanceCount = 1,
-		   firstVertex = 0,
-		   firstInstance = 0)
+	vk.CmdDrawIndexed(commandBuffer = command_buffer,
+			  indexCount = cast(u32)len(rectangle_indices),
+			  instanceCount = 1,
+			  firstIndex = 0,
+			  vertexOffset = 0,
+			  firstInstance = 0)
 
 	vk.CmdEndRenderPass(command_buffer)
 
