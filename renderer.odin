@@ -6,6 +6,9 @@ import "vendor:glfw"
 import "core:log"
 import "core:slice"
 import "core:mem"
+import "core:time"
+import "core:math"
+import "core:math/linalg"
 
 @(rodata) vertex_shader_bytecode := #load("shader_vert.spv")
 @(rodata) fragment_shader_bytecode := #load("shader_frag.spv")
@@ -13,6 +16,8 @@ import "core:mem"
 Vec2 :: [2]f32
 Vec3 :: [3]f32
 Vec4 :: [4]f32
+
+Mat4 :: matrix[4, 4]f32
 
 Vertex :: struct {
 	position: Vec2,
@@ -79,6 +84,7 @@ Renderer :: struct {
 	swap_chain_extent: vk.Extent2D,
 
 	render_pass: vk.RenderPass,
+	descriptor_set_layout: vk.DescriptorSetLayout,
 	pipeline_layout: vk.PipelineLayout,
 	pipeline: vk.Pipeline,
 	framebuffers: [dynamic]vk.Framebuffer,
@@ -90,6 +96,13 @@ Renderer :: struct {
 	vertex_buffer_memory: vk.DeviceMemory,
 	index_buffer: vk.Buffer,
 	index_buffer_memory: vk.DeviceMemory,
+
+	uniform_buffers: [dynamic]vk.Buffer,
+	uniform_buffers_memory: [dynamic]vk.DeviceMemory,
+	uniform_buffers_mapped: [dynamic]rawptr,
+
+	descriptor_pool: vk.DescriptorPool,
+	descriptor_sets: [dynamic]vk.DescriptorSet,
 
 	image_available_semaphores: [dynamic]vk.Semaphore,
 	render_finished_semaphores: [dynamic]vk.Semaphore,
@@ -103,6 +116,12 @@ Swap_Chain_Properties :: struct {
 	surface_format: vk.SurfaceFormatKHR,
 	presentation_mode: vk.PresentModeKHR,
 	extent: vk.Extent2D,
+}
+
+MVP_Buffer :: struct {
+	model: Mat4,
+	view: Mat4,
+	projection: Mat4,
 }
 
 init_renderer :: proc(renderer: ^Renderer,
@@ -127,6 +146,8 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_swap_chain(renderer^)
 	init_renderer_render_pass(renderer) or_return
 	defer if !ok do deinit_renderer_render_pass(renderer^)
+	init_renderer_descriptor_set_layout(renderer) or_return
+	defer if !ok do deinit_renderer_descriptor_set_layout(renderer^)
 	init_renderer_graphics_pipeline(renderer) or_return
 	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
 	init_renderer_framebuffers(renderer) or_return
@@ -137,6 +158,12 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_vertex_buffer(renderer^)
 	init_renderer_index_buffer(renderer) or_return
 	defer if !ok do deinit_renderer_index_buffer(renderer^)
+	init_renderer_uniform_buffers(renderer) or_return
+	defer if !ok do deinit_renderer_uniform_buffers(renderer^)
+	init_renderer_descriptor_pool(renderer) or_return
+	defer if !ok do deinit_renderer_descriptor_pool(renderer^)
+	init_renderer_descriptor_sets(renderer) or_return
+	defer if !ok do deinit_renderer_descriptor_sets(renderer^)
 	init_renderer_synchronization_primitives(renderer) or_return
 	defer if !ok do deinit_renderer_synchronization_primitives(renderer^)
 
@@ -147,11 +174,15 @@ init_renderer :: proc(renderer: ^Renderer,
 deinit_renderer :: proc(renderer: Renderer) {
 	vk.DeviceWaitIdle(renderer.device)
 	deinit_renderer_synchronization_primitives(renderer)
+	deinit_renderer_descriptor_sets(renderer)
+	deinit_renderer_descriptor_pool(renderer)
+	deinit_renderer_uniform_buffers(renderer)
 	deinit_renderer_index_buffer(renderer)
 	deinit_renderer_vertex_buffer(renderer)
 	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_framebuffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
+	deinit_renderer_descriptor_set_layout(renderer)
 	deinit_renderer_render_pass(renderer)
 	deinit_renderer_swap_chain(renderer)
 	deinit_renderer_device(renderer)
@@ -468,6 +499,37 @@ deinit_renderer_render_pass :: proc(renderer: Renderer) {
 }
 
 @(private="file")
+init_renderer_descriptor_set_layout :: proc(renderer: ^Renderer) -> (ok := false) {
+	mvp_buffer_layout_binding := vk.DescriptorSetLayoutBinding {
+		binding = 0,
+		descriptorType = .UNIFORM_BUFFER,
+		descriptorCount = 1,
+		stageFlags = { .VERTEX },
+	}
+
+	descriptor_set_create_info := vk.DescriptorSetLayoutCreateInfo {
+		sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		bindingCount = 1,
+		pBindings = &mvp_buffer_layout_binding,
+	}
+
+	if vk.CreateDescriptorSetLayout(renderer.device,
+					&descriptor_set_create_info,
+					nil,
+					&renderer.descriptor_set_layout) != .SUCCESS {
+		return
+	}
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_descriptor_set_layout :: proc(renderer: Renderer) {
+	vk.DestroyDescriptorSetLayout(renderer.device, renderer.descriptor_set_layout, nil)
+}
+
+@(private="file")
 init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 	vertex_shader_module := create_shader_module(renderer.device, vertex_shader_bytecode) or_return
 	defer destroy_shader_module(renderer.device, vertex_shader_module)
@@ -521,7 +583,7 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 		polygonMode = .FILL,
 		lineWidth = 1,
 		cullMode = { .BACK },
-		frontFace = .CLOCKWISE,
+		frontFace = .COUNTER_CLOCKWISE,
 		depthBiasEnable = false,
 	}
 
@@ -551,6 +613,8 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 
 	pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
 		sType = .PIPELINE_LAYOUT_CREATE_INFO,
+		setLayoutCount = 1,
+		pSetLayouts = &renderer.descriptor_set_layout,
 	}
 
 	if vk.CreatePipelineLayout(renderer.device,
@@ -723,6 +787,130 @@ init_renderer_index_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 @(private="file")
 deinit_renderer_index_buffer :: proc(renderer: Renderer) {
 	destroy_buffer(renderer.device, renderer.index_buffer, renderer.index_buffer_memory)
+}
+
+@(private="file")
+init_renderer_uniform_buffers :: proc(renderer: ^Renderer) -> (ok := false) {
+	buffer_size := cast(vk.DeviceSize)size_of(MVP_Buffer)
+
+	renderer.uniform_buffers = make([dynamic]vk.Buffer, 0, MAX_FRAMES_IN_FLIGHT)
+	renderer.uniform_buffers_memory = make([dynamic]vk.DeviceMemory, 0, MAX_FRAMES_IN_FLIGHT)
+	renderer.uniform_buffers_mapped = make([dynamic]rawptr, 0, MAX_FRAMES_IN_FLIGHT)
+	defer if !ok {
+		destroy_buffers(renderer.device, renderer.uniform_buffers[:], renderer.uniform_buffers_memory[:])
+		delete(renderer.uniform_buffers)
+		delete(renderer.uniform_buffers_memory)
+		delete(renderer.uniform_buffers_mapped)
+	}
+	for i in 0..<MAX_FRAMES_IN_FLIGHT {
+		buffer, buffer_memory := create_buffer(renderer.physical_device,
+						       renderer.device,
+						       buffer_size,
+						       { .UNIFORM_BUFFER },
+						       { .HOST_VISIBLE, .HOST_COHERENT }) or_return
+		buffer_mapped: rawptr
+		// Persistent mapping
+		vk.MapMemory(renderer.device, buffer_memory, 0, buffer_size, {}, &buffer_mapped)
+
+		append(&renderer.uniform_buffers, buffer)
+		append(&renderer.uniform_buffers_memory, buffer_memory)
+		append(&renderer.uniform_buffers_mapped, buffer_mapped)
+	}
+
+	assert(len(renderer.uniform_buffers) == MAX_FRAMES_IN_FLIGHT)
+	assert(len(renderer.uniform_buffers_memory) == MAX_FRAMES_IN_FLIGHT)
+	assert(len(renderer.uniform_buffers_mapped) == MAX_FRAMES_IN_FLIGHT)
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_uniform_buffers :: proc(renderer: Renderer) {
+	destroy_buffers(renderer.device, renderer.uniform_buffers[:], renderer.uniform_buffers_memory[:])
+	delete(renderer.uniform_buffers)
+	delete(renderer.uniform_buffers_memory)
+	delete(renderer.uniform_buffers_mapped)
+}
+
+@(private="file")
+init_renderer_descriptor_pool :: proc(renderer: ^Renderer) -> (ok := false) {
+	pool_size := vk.DescriptorPoolSize {
+		type = .UNIFORM_BUFFER,
+		descriptorCount = MAX_FRAMES_IN_FLIGHT,
+	}
+
+	pool_create_info := vk.DescriptorPoolCreateInfo {
+		sType = .DESCRIPTOR_POOL_CREATE_INFO,
+		poolSizeCount = 1,
+		pPoolSizes = &pool_size,
+		maxSets = MAX_FRAMES_IN_FLIGHT,
+	}
+
+	if vk.CreateDescriptorPool(renderer.device, &pool_create_info, nil, &renderer.descriptor_pool) !=. SUCCESS {
+		return
+	}
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_descriptor_pool :: proc(renderer: Renderer) {
+	vk.DestroyDescriptorPool(renderer.device, renderer.descriptor_pool, nil)
+}
+
+@(private="file")
+init_renderer_descriptor_sets :: proc(renderer: ^Renderer) -> (ok := false) {
+	layouts := [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSetLayout{
+		0..<MAX_FRAMES_IN_FLIGHT = renderer.descriptor_set_layout
+	}
+
+	renderer.descriptor_sets = make([dynamic]vk.DescriptorSet, MAX_FRAMES_IN_FLIGHT)
+	defer if !ok do delete(renderer.descriptor_sets)
+
+	set_allocate_info := vk.DescriptorSetAllocateInfo {
+		sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
+		descriptorPool = renderer.descriptor_pool,
+		descriptorSetCount = cast(u32)len(renderer.descriptor_sets),
+		pSetLayouts = raw_data(&layouts),
+	}
+
+	if vk.AllocateDescriptorSets(renderer.device, &set_allocate_info, raw_data(renderer.descriptor_sets)) != .SUCCESS {
+		return
+	}
+
+	for descriptor_set, i in renderer.descriptor_sets {
+		descriptor_buffer_info := vk.DescriptorBufferInfo {
+			buffer = renderer.uniform_buffers[i],
+			offset = 0,
+			range = size_of(MVP_Buffer),
+		}
+
+		descriptor_write := vk.WriteDescriptorSet {
+			sType = .WRITE_DESCRIPTOR_SET,
+			dstSet = renderer.descriptor_sets[i],
+			dstBinding = 0,
+			dstArrayElement = 0,
+			descriptorType = .UNIFORM_BUFFER,
+			descriptorCount = 1,
+			pBufferInfo = &descriptor_buffer_info,
+		}
+
+		vk.UpdateDescriptorSets(device = renderer.device,
+					descriptorWriteCount = 1,
+					pDescriptorWrites = &descriptor_write,
+					descriptorCopyCount = 0,
+					pDescriptorCopies = nil)
+	}
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_descriptor_sets :: proc(renderer: Renderer) {
+	delete(renderer.descriptor_sets)
 }
 
 @(private="file")
@@ -963,6 +1151,12 @@ recreate_swap_chain :: proc(renderer: ^Renderer) {
 }
 
 @(private="file")
+destroy_buffers :: proc(device: vk.Device, buffers: []vk.Buffer, buffers_memory: []vk.DeviceMemory) {
+	assert(len(buffers) == len(buffers_memory))
+	for i in 0..<len(buffers) do destroy_buffer(device, buffers[i], buffers_memory[i])
+}
+
+@(private="file")
 destroy_image_views :: proc(device: vk.Device, image_views: []vk.ImageView) {
 	for image_view in image_views do vk.DestroyImageView(device, image_view, nil)
 }
@@ -1027,9 +1221,9 @@ vk_debug_utils_messenger_callback :: proc "std" (message_severity: vk.DebugUtils
 }
 
 @(private="file")
-renderer_record_command_buffer :: proc(renderer: Renderer,
-				       command_buffer: vk.CommandBuffer,
-				       swap_chain_image_index: u32) -> (ok := false) {
+renderer_record_command_buffer :: proc(renderer: Renderer, swap_chain_image_index: u32) -> (ok := false) {
+	command_buffer := renderer.command_buffers[renderer.current_frame]
+
 	vk.ResetCommandBuffer(command_buffer, {})
 
 	command_buffer_begin_info := vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO }
@@ -1085,6 +1279,14 @@ renderer_record_command_buffer :: proc(renderer: Renderer,
 			      offset = 0,
 			      indexType = .UINT16)
 
+	vk.CmdBindDescriptorSets(commandBuffer = command_buffer,
+				 pipelineBindPoint = .GRAPHICS,
+				 layout = renderer.pipeline_layout,
+				 firstSet = 0,
+				 descriptorSetCount = 1,
+				 pDescriptorSets = &renderer.descriptor_sets[renderer.current_frame],
+				 dynamicOffsetCount = 0,
+				 pDynamicOffsets = nil)
 	vk.CmdDrawIndexed(commandBuffer = command_buffer,
 			  indexCount = cast(u32)len(rectangle_indices),
 			  instanceCount = 1,
@@ -1098,6 +1300,31 @@ renderer_record_command_buffer :: proc(renderer: Renderer,
 
 	ok = true
 	return
+}
+
+@(private="file")
+renderer_update_uniform_buffer :: proc(renderer: Renderer, buffer_mapped: rawptr) {
+	@(static) start_time: Maybe(time.Time)
+	if _, start_time_set := start_time.?; !start_time_set do start_time = time.now()
+
+	current_time := time.now()
+	elapsed_seconds := cast(f32)time.duration_seconds(time.diff(start_time.?, current_time))
+	aspect_ratio := f32(renderer.swap_chain_extent.width) / f32(renderer.swap_chain_extent.height)
+
+	mvp_buffer := MVP_Buffer {
+		model = linalg.matrix4_rotate(elapsed_seconds * math.to_radians(f32(90)), Vec3{ 0, 0, 1 }),
+		view = linalg.matrix4_look_at(eye = Vec3{ 2, 2, 2 },
+					      centre = Vec3{ 0, 0, 0 },
+					      up = Vec3{ 0, 0, 1 }),
+		projection = linalg.matrix4_perspective(fovy = math.to_radians(f32(45)),
+						        aspect = aspect_ratio,
+						        near = 0.1,
+						        far = 10),
+	}
+
+	mvp_buffer.projection[1][1] *= -1 // Flip Y scale for Vulkan.
+
+	mem.copy(buffer_mapped, &mvp_buffer, size_of(mvp_buffer))
 }
 
 renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
@@ -1124,9 +1351,8 @@ renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
 	}
 
 	vk.ResetFences(renderer.device, 1, &renderer.in_flight_fences[renderer.current_frame])
-	renderer_record_command_buffer(renderer^,
-				       renderer.command_buffers[renderer.current_frame],
-				       swap_chain_image_index)
+	renderer_record_command_buffer(renderer^, swap_chain_image_index)
+	renderer_update_uniform_buffer(renderer^, renderer.uniform_buffers_mapped[renderer.current_frame])
 
 	pipeline_waiting_stages := vk.PipelineStageFlags{ .TOP_OF_PIPE }
 	submit_info := vk.SubmitInfo {
