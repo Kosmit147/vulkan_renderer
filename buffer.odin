@@ -2,8 +2,8 @@ package vulkan_renderer
 
 import vk "vendor:vulkan"
 
-create_buffer :: proc(physical_device: vk.PhysicalDevice,
-		      device: vk.Device,
+create_buffer :: proc(device: vk.Device,
+		      physical_device: vk.PhysicalDevice,
 		      size: vk.DeviceSize,
 		      usage: vk.BufferUsageFlags,
 		      properties: vk.MemoryPropertyFlags) -> (buffer: vk.Buffer,
@@ -49,32 +49,12 @@ copy_buffer :: proc(device: vk.Device,
 		    queue: vk.Queue,
 		    src_buffer, dst_buffer: vk.Buffer,
 		    size: vk.DeviceSize) -> (ok := false) {
-	command_buffer_allocate_info := vk.CommandBufferAllocateInfo {
-		sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-		level = .PRIMARY,
-		commandPool = command_pool,
-		commandBufferCount = 1,
+	command_buffer := begin_single_time_commands(device, command_pool) or_return
+	copy_region := vk.BufferCopy {
+		size = cast(vk.DeviceSize)size
 	}
-	command_buffer: vk.CommandBuffer
-	if vk.AllocateCommandBuffers(device, &command_buffer_allocate_info, &command_buffer) != .SUCCESS do return
-	defer vk.FreeCommandBuffers(device, command_pool, 1, &command_buffer)
-
-	command_buffer_begin_info := vk.CommandBufferBeginInfo {
-		sType = .COMMAND_BUFFER_BEGIN_INFO,
-		flags = { .ONE_TIME_SUBMIT },
-	}
-	vk.BeginCommandBuffer(command_buffer, &command_buffer_begin_info)
-	copy_region := vk.BufferCopy { size = cast(vk.DeviceSize)size }
 	vk.CmdCopyBuffer(command_buffer, src_buffer, dst_buffer, 1, &copy_region)
-	vk.EndCommandBuffer(command_buffer)
-
-	submit_info := vk.SubmitInfo {
-		sType = .SUBMIT_INFO,
-		commandBufferCount = 1,
-		pCommandBuffers = &command_buffer,
-	}
-	vk.QueueSubmit(queue, 1, &submit_info, vk.Fence(0))
-	vk.QueueWaitIdle(queue)
+	submit_single_time_commands(command_buffer, queue, device, command_pool)
 
 	ok = true
 	return

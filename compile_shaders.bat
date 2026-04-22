@@ -1,3 +1,3 @@
-glslc shader.vert -o shader_vert.spv
-glslc shader.frag -o shader_frag.spv
+glslc shaders/shader.vert -o shaders/shader_vert.spv
+glslc shaders/shader.frag -o shaders/shader_frag.spv
 pause

@@ -2,6 +2,7 @@ package vulkan_renderer
 
 import vk "vendor:vulkan"
 import "vendor:glfw"
+import stbi "vendor:stb/image"
 
 import "core:log"
 import "core:slice"
@@ -10,8 +11,10 @@ import "core:time"
 import "core:math"
 import "core:math/linalg"
 
-@(rodata) vertex_shader_bytecode := #load("shader_vert.spv")
-@(rodata) fragment_shader_bytecode := #load("shader_frag.spv")
+TEXTURE_PATH :: "textures/texture.jpg"
+
+@(rodata) vertex_shader_bytecode := #load("shaders/shader_vert.spv")
+@(rodata) fragment_shader_bytecode := #load("shaders/shader_frag.spv")
 
 Vec2 :: [2]f32
 Vec3 :: [3]f32
@@ -92,6 +95,9 @@ Renderer :: struct {
 	command_pool: vk.CommandPool,
 	command_buffers: [dynamic]vk.CommandBuffer,
 
+	texture_image: vk.Image,
+	texture_image_memory: vk.DeviceMemory,
+
 	vertex_buffer: vk.Buffer,
 	vertex_buffer_memory: vk.DeviceMemory,
 	index_buffer: vk.Buffer,
@@ -154,6 +160,8 @@ init_renderer :: proc(renderer: ^Renderer,
 	defer if !ok do deinit_renderer_framebuffers(renderer^)
 	init_renderer_command_buffers(renderer) or_return
 	defer if !ok do deinit_renderer_command_buffers(renderer^)
+	init_renderer_texture_image(renderer) or_return
+	defer if !ok do deinit_renderer_texture_image(renderer^)
 	init_renderer_vertex_buffer(renderer) or_return
 	defer if !ok do deinit_renderer_vertex_buffer(renderer^)
 	init_renderer_index_buffer(renderer) or_return
@@ -179,6 +187,7 @@ deinit_renderer :: proc(renderer: Renderer) {
 	deinit_renderer_uniform_buffers(renderer)
 	deinit_renderer_index_buffer(renderer)
 	deinit_renderer_vertex_buffer(renderer)
+	deinit_renderer_texture_image(renderer)
 	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_framebuffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
@@ -702,11 +711,78 @@ deinit_renderer_framebuffers :: proc(renderer: Renderer) {
 }
 
 @(private="file")
+init_renderer_texture_image :: proc(renderer: ^Renderer) -> (ok := false) {
+	DESIRED_CHANNELS :: 4
+	width, height, channels: i32
+	pixels := stbi.load(TEXTURE_PATH, &width, &height, &channels, DESIRED_CHANNELS)
+	if pixels == nil do return
+	defer stbi.image_free(pixels)
+
+	image_size := int(width * height * DESIRED_CHANNELS)
+	staging_buffer, staging_buffer_memory := create_buffer(renderer.device,
+							       renderer.physical_device,
+							       cast(vk.DeviceSize)image_size,
+							       { .TRANSFER_SRC },
+							       { .HOST_VISIBLE, .HOST_COHERENT }) or_return
+	defer destroy_buffer(renderer.device, staging_buffer, staging_buffer_memory)
+
+	mapped_data: rawptr
+	vk.MapMemory(device = renderer.device,
+		     memory = staging_buffer_memory,
+		     offset = 0,
+		     size = cast(vk.DeviceSize)image_size,
+		     flags = {},
+		     ppData = &mapped_data)
+	mem.copy(mapped_data, pixels, image_size)
+	vk.UnmapMemory(renderer.device, staging_buffer_memory)
+
+	renderer.texture_image, renderer.texture_image_memory = create_image(device = renderer.device,
+		     							     physical_device = renderer.physical_device,
+		     							     width = u32(width),
+		     							     height = u32(height),
+		     							     format = .R8G8B8A8_SRGB,
+		     							     tiling = .OPTIMAL,
+		     							     usage = { .TRANSFER_DST, .SAMPLED },
+		     							     memory_properties = { .DEVICE_LOCAL }) or_return
+	defer if !ok do destroy_image(renderer.device, renderer.texture_image, renderer.texture_image_memory)
+
+	transition_image_layout(device = renderer.device,
+				command_pool = renderer.command_pool,
+				queue = renderer.graphics_queue,
+				image = renderer.texture_image,
+				format = .R8G8B8_SRGB,
+				old_layout = .UNDEFINED,
+				new_layout = .TRANSFER_DST_OPTIMAL)
+	copy_buffer_to_image(device = renderer.device,
+			     command_pool = renderer.command_pool,
+			     queue = renderer.graphics_queue,
+			     buffer = staging_buffer,
+			     image = renderer.texture_image,
+			     width = u32(width),
+			     height = u32(height))
+	transition_image_layout(device = renderer.device,
+				command_pool = renderer.command_pool,
+				queue = renderer.graphics_queue,
+				image = renderer.texture_image,
+				format = .R8G8B8_SRGB,
+				old_layout = .TRANSFER_DST_OPTIMAL,
+				new_layout = .SHADER_READ_ONLY_OPTIMAL)
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_texture_image :: proc(renderer: Renderer) {
+	destroy_image(renderer.device, renderer.texture_image, renderer.texture_image_memory)
+}
+
+@(private="file")
 init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 	buffer_size := slice.size(rectangle_vertices)
 
-	staging_buffer, staging_buffer_memory := create_buffer(renderer.physical_device,
-							       renderer.device,
+	staging_buffer, staging_buffer_memory := create_buffer(renderer.device,
+							       renderer.physical_device,
 							       cast(vk.DeviceSize)buffer_size,
 							       { .TRANSFER_SRC },
 							       { .HOST_VISIBLE, .HOST_COHERENT }) or_return
@@ -722,8 +798,8 @@ init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 	mem.copy(buffer_data, raw_data(rectangle_vertices), buffer_size)
 	vk.UnmapMemory(renderer.device, staging_buffer_memory)
 
-	renderer.vertex_buffer, renderer.vertex_buffer_memory = create_buffer(renderer.physical_device,
-									      renderer.device,
+	renderer.vertex_buffer, renderer.vertex_buffer_memory = create_buffer(renderer.device,
+									      renderer.physical_device,
 									      cast(vk.DeviceSize)buffer_size,
 									      { .VERTEX_BUFFER, .TRANSFER_DST },
 									      { .DEVICE_LOCAL }) or_return
@@ -749,8 +825,8 @@ deinit_renderer_vertex_buffer :: proc(renderer: Renderer) {
 init_renderer_index_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 	buffer_size := slice.size(rectangle_indices)
 
-	staging_buffer, staging_buffer_memory := create_buffer(renderer.physical_device,
-							       renderer.device,
+	staging_buffer, staging_buffer_memory := create_buffer(renderer.device,
+							       renderer.physical_device,
 							       cast(vk.DeviceSize)buffer_size,
 							       { .TRANSFER_SRC },
 							       { .HOST_VISIBLE, .HOST_COHERENT }) or_return
@@ -766,8 +842,8 @@ init_renderer_index_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 	mem.copy(buffer_data, raw_data(rectangle_indices), buffer_size)
 	vk.UnmapMemory(renderer.device, staging_buffer_memory)
 
-	renderer.index_buffer, renderer.index_buffer_memory = create_buffer(renderer.physical_device,
-									    renderer.device,
+	renderer.index_buffer, renderer.index_buffer_memory = create_buffer(renderer.device,
+									    renderer.physical_device,
 									    cast(vk.DeviceSize)buffer_size,
 									    { .INDEX_BUFFER, .TRANSFER_DST },
 									    { .DEVICE_LOCAL }) or_return
@@ -803,8 +879,8 @@ init_renderer_uniform_buffers :: proc(renderer: ^Renderer) -> (ok := false) {
 		delete(renderer.uniform_buffers_mapped)
 	}
 	for i in 0..<MAX_FRAMES_IN_FLIGHT {
-		buffer, buffer_memory := create_buffer(renderer.physical_device,
-						       renderer.device,
+		buffer, buffer_memory := create_buffer(renderer.device,
+						       renderer.physical_device,
 						       buffer_size,
 						       { .UNIFORM_BUFFER },
 						       { .HOST_VISIBLE, .HOST_COHERENT }) or_return
