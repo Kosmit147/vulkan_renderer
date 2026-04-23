@@ -150,3 +150,29 @@ copy_buffer_to_image :: proc(device: vk.Device,
 
 	submit_single_time_commands(command_buffer, queue, device, command_pool)
 }
+
+create_image_view :: proc(device: vk.Device, image: vk.Image, format: vk.Format) -> (view: vk.ImageView, ok := false) {
+	image_view_create_info := vk.ImageViewCreateInfo {
+		sType = .IMAGE_VIEW_CREATE_INFO,
+		image = image,
+		viewType = .D2,
+		format = format,
+		components = { .IDENTITY, .IDENTITY, .IDENTITY, .IDENTITY },
+		subresourceRange = {
+			aspectMask = { .COLOR },
+			baseMipLevel = 0,
+			levelCount = 1,
+			baseArrayLayer = 0,
+			layerCount = 1,
+		}
+	}
+
+	if vk.CreateImageView(device, &image_view_create_info, nil, &view) !=. SUCCESS do return
+
+	ok = true
+	return
+}
+
+destroy_image_view :: proc(device: vk.Device, view: vk.ImageView) {
+	vk.DestroyImageView(device, view, nil)
+}

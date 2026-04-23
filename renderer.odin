@@ -74,6 +74,7 @@ Renderer :: struct {
 
 	physical_device: vk.PhysicalDevice,
 	device: vk.Device,
+	physical_device_properties: vk.PhysicalDeviceProperties,
 	graphics_queue_family_index: u32,
 	graphics_queue: vk.Queue,
 	presentation_queue_family_index: u32,
@@ -97,6 +98,8 @@ Renderer :: struct {
 
 	texture_image: vk.Image,
 	texture_image_memory: vk.DeviceMemory,
+	texture_image_view: vk.ImageView,
+	texture_sampler: vk.Sampler,
 
 	vertex_buffer: vk.Buffer,
 	vertex_buffer_memory: vk.DeviceMemory,
@@ -146,32 +149,52 @@ init_renderer :: proc(renderer: ^Renderer,
 
 	init_renderer_instance(renderer, application_name, layers[:], instance_extensions[:]) or_return
 	defer if !ok do deinit_renderer_instance(renderer^)
+
 	init_renderer_device(renderer, layers[:], device_extensions[:]) or_return
 	defer if !ok do deinit_renderer_device(renderer^)
+
 	init_renderer_swap_chain(renderer) or_return
 	defer if !ok do deinit_renderer_swap_chain(renderer^)
+
 	init_renderer_render_pass(renderer) or_return
 	defer if !ok do deinit_renderer_render_pass(renderer^)
+
 	init_renderer_descriptor_set_layout(renderer) or_return
 	defer if !ok do deinit_renderer_descriptor_set_layout(renderer^)
+
 	init_renderer_graphics_pipeline(renderer) or_return
 	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
+
 	init_renderer_framebuffers(renderer) or_return
 	defer if !ok do deinit_renderer_framebuffers(renderer^)
+
 	init_renderer_command_buffers(renderer) or_return
 	defer if !ok do deinit_renderer_command_buffers(renderer^)
+
 	init_renderer_texture_image(renderer) or_return
 	defer if !ok do deinit_renderer_texture_image(renderer^)
+
+	init_renderer_texture_image_view(renderer) or_return
+	defer if !ok do deinit_renderer_texture_image_view(renderer^)
+
+	init_renderer_texture_sampler(renderer) or_return
+	defer if !ok do deinit_renderer_texture_sampler(renderer^)
+
 	init_renderer_vertex_buffer(renderer) or_return
 	defer if !ok do deinit_renderer_vertex_buffer(renderer^)
+
 	init_renderer_index_buffer(renderer) or_return
 	defer if !ok do deinit_renderer_index_buffer(renderer^)
+
 	init_renderer_uniform_buffers(renderer) or_return
 	defer if !ok do deinit_renderer_uniform_buffers(renderer^)
+
 	init_renderer_descriptor_pool(renderer) or_return
 	defer if !ok do deinit_renderer_descriptor_pool(renderer^)
+
 	init_renderer_descriptor_sets(renderer) or_return
 	defer if !ok do deinit_renderer_descriptor_sets(renderer^)
+
 	init_renderer_synchronization_primitives(renderer) or_return
 	defer if !ok do deinit_renderer_synchronization_primitives(renderer^)
 
@@ -187,6 +210,8 @@ deinit_renderer :: proc(renderer: Renderer) {
 	deinit_renderer_uniform_buffers(renderer)
 	deinit_renderer_index_buffer(renderer)
 	deinit_renderer_vertex_buffer(renderer)
+	deinit_renderer_texture_sampler(renderer)
+	deinit_renderer_texture_image_view(renderer)
 	deinit_renderer_texture_image(renderer)
 	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_framebuffers(renderer)
@@ -288,6 +313,7 @@ init_renderer_device :: proc(renderer: ^Renderer,
 	for &device in physical_devices {
 		if device_suitable(device, extensions, renderer.window, renderer.surface) {
 			renderer.physical_device = device
+			vk.GetPhysicalDeviceProperties(renderer.physical_device, &renderer.physical_device_properties)
 			suitable_physical_device_found = true
 			break
 		}
@@ -343,6 +369,7 @@ init_renderer_device :: proc(renderer: ^Renderer,
 	}
 
 	physical_device_features := vk.PhysicalDeviceFeatures{}
+	physical_device_features.samplerAnisotropy = true
 
 	device_create_info := vk.DeviceCreateInfo {
 		sType = .DEVICE_CREATE_INFO,
@@ -431,22 +458,7 @@ init_renderer_swap_chain :: proc(renderer: ^Renderer) -> (ok := false) {
 		delete(renderer.swap_chain_image_views)
 	}
 	for image in renderer.swap_chain_images {
-		image_view_create_info := vk.ImageViewCreateInfo {
-			sType = .IMAGE_VIEW_CREATE_INFO,
-			image = image,
-			viewType = .D2,
-			format = renderer.swap_chain_image_format,
-			components = { .IDENTITY, .IDENTITY, .IDENTITY, .IDENTITY },
-			subresourceRange = {
-				aspectMask = { .COLOR },
-				baseMipLevel = 0,
-				levelCount = 1,
-				baseArrayLayer = 0,
-				layerCount = 1,
-			},
-		}
-		image_view: vk.ImageView
-		if vk.CreateImageView(renderer.device, &image_view_create_info, nil, &image_view) != .SUCCESS do return
+		image_view := create_image_view(renderer.device, image, renderer.swap_chain_image_format) or_return
 		append(&renderer.swap_chain_image_views, image_view)
 	}
 	assert(len(renderer.swap_chain_images) == len(renderer.swap_chain_image_views))
@@ -775,6 +787,50 @@ init_renderer_texture_image :: proc(renderer: ^Renderer) -> (ok := false) {
 @(private="file")
 deinit_renderer_texture_image :: proc(renderer: Renderer) {
 	destroy_image(renderer.device, renderer.texture_image, renderer.texture_image_memory)
+}
+
+@(private="file")
+init_renderer_texture_image_view :: proc(renderer: ^Renderer) -> (ok := false) {
+	renderer.texture_image_view = create_image_view(renderer.device, renderer.texture_image, .R8G8B8A8_SRGB) or_return
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_texture_image_view :: proc(renderer: Renderer) {
+	destroy_image_view(renderer.device, renderer.texture_image_view)
+}
+
+@(private="file")
+init_renderer_texture_sampler :: proc(renderer: ^Renderer) -> (ok := false) {
+	sampler_create_info := vk.SamplerCreateInfo {
+		sType = .SAMPLER_CREATE_INFO,
+		magFilter = .LINEAR,
+		minFilter = .LINEAR,
+		addressModeU = .REPEAT,
+		addressModeV = .REPEAT,
+		addressModeW = .REPEAT,
+		anisotropyEnable = true,
+		maxAnisotropy = renderer.physical_device_properties.limits.maxSamplerAnisotropy,
+		borderColor = .INT_OPAQUE_BLACK,
+		unnormalizedCoordinates = false,
+		compareEnable = false,
+		compareOp = .ALWAYS,
+		mipmapMode = .LINEAR,
+		mipLodBias = 0,
+		minLod = 0,
+		maxLod = 0,
+	}
+
+	if vk.CreateSampler(renderer.device, &sampler_create_info, nil, &renderer.texture_sampler) != .SUCCESS do return
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_texture_sampler :: proc(renderer: Renderer) {
+	vk.DestroySampler(renderer.device, renderer.texture_sampler, nil)
 }
 
 @(private="file")
@@ -1185,10 +1241,13 @@ get_swap_chain_properties :: proc(window: glfw.WindowHandle,
 device_suitable :: proc(physical_device: vk.PhysicalDevice,
 			required_device_extensions: []cstring,
 			window: glfw.WindowHandle,
-			surface: vk.SurfaceKHR) -> (ok := false) {
+			surface: vk.SurfaceKHR) -> (suitable := false) {
 	device_properties: vk.PhysicalDeviceProperties
 	vk.GetPhysicalDeviceProperties(physical_device, &device_properties)
 	if device_properties.deviceType != .DISCRETE_GPU do return
+	device_features: vk.PhysicalDeviceFeatures
+	vk.GetPhysicalDeviceFeatures(physical_device, &device_features)
+	if !device_features.samplerAnisotropy do return
 
 	device_extension_count: u32
 	vk.EnumerateDeviceExtensionProperties(physical_device, nil, &device_extension_count, nil)
@@ -1207,7 +1266,7 @@ device_suitable :: proc(physical_device: vk.PhysicalDevice,
 		if !required_extension_found do return
 	}
 
-	ok = true
+	suitable = true
 	return
 }
 
@@ -1234,7 +1293,7 @@ destroy_buffers :: proc(device: vk.Device, buffers: []vk.Buffer, buffers_memory:
 
 @(private="file")
 destroy_image_views :: proc(device: vk.Device, image_views: []vk.ImageView) {
-	for image_view in image_views do vk.DestroyImageView(device, image_view, nil)
+	for image_view in image_views do destroy_image_view(device, image_view)
 }
 
 @(private="file")
