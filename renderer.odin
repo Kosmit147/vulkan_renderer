@@ -25,14 +25,15 @@ Mat4 :: matrix[4, 4]f32
 Vertex :: struct {
 	position: Vec2,
 	color: Vec3,
+	uv: Vec2,
 }
 
 @(rodata)
 rectangle_vertices := []Vertex{
-	{ { -0.5, -0.5 }, { 1, 0, 0 } },
-	{ {  0.5, -0.5 }, { 0, 1, 0 } },
-	{ {  0.5,  0.5 }, { 0, 0, 1 } },
-	{ { -0.5,  0.5 }, { 1, 1, 1 } },
+	{ { -0.5, -0.5 }, { 1, 0, 0 }, { 1, 0 } },
+	{ {  0.5, -0.5 }, { 0, 1, 0 }, { 0, 0 } },
+	{ {  0.5,  0.5 }, { 0, 0, 1 }, { 0, 1 } },
+	{ { -0.5,  0.5 }, { 1, 1, 1 }, { 1, 1 } },
 }
 
 @(rodata)
@@ -46,8 +47,8 @@ get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
 	}
 }
 
-get_vertex_attribute_descriptions :: proc() -> [2]vk.VertexInputAttributeDescription {
-	return [2]vk.VertexInputAttributeDescription{
+get_vertex_attribute_descriptions :: proc() -> [3]vk.VertexInputAttributeDescription {
+	return [3]vk.VertexInputAttributeDescription{
 		vk.VertexInputAttributeDescription{
 			binding = 0,
 			location = 0,
@@ -59,6 +60,12 @@ get_vertex_attribute_descriptions :: proc() -> [2]vk.VertexInputAttributeDescrip
 			location = 1,
 			format = .R32G32B32_SFLOAT,
 			offset = cast(u32)offset_of(Vertex, color),
+		},
+		vk.VertexInputAttributeDescription{
+			binding = 0,
+			location = 2,
+			format = .R32G32_SFLOAT,
+			offset = cast(u32)offset_of(Vertex, uv),
 		},
 	}
 }
@@ -528,10 +535,19 @@ init_renderer_descriptor_set_layout :: proc(renderer: ^Renderer) -> (ok := false
 		stageFlags = { .VERTEX },
 	}
 
+	sampler_layout_binding := vk.DescriptorSetLayoutBinding {
+		binding = 1,
+		descriptorCount = 1,
+		descriptorType = .COMBINED_IMAGE_SAMPLER,
+		pImmutableSamplers = nil,
+		stageFlags = { .FRAGMENT },
+	}
+
+	bindings := [?]vk.DescriptorSetLayoutBinding{ mvp_buffer_layout_binding, sampler_layout_binding }
 	descriptor_set_create_info := vk.DescriptorSetLayoutCreateInfo {
 		sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-		bindingCount = 1,
-		pBindings = &mvp_buffer_layout_binding,
+		bindingCount = len(bindings),
+		pBindings = raw_data(&bindings),
 	}
 
 	if vk.CreateDescriptorSetLayout(renderer.device,
@@ -967,15 +983,15 @@ deinit_renderer_uniform_buffers :: proc(renderer: Renderer) {
 
 @(private="file")
 init_renderer_descriptor_pool :: proc(renderer: ^Renderer) -> (ok := false) {
-	pool_size := vk.DescriptorPoolSize {
-		type = .UNIFORM_BUFFER,
-		descriptorCount = MAX_FRAMES_IN_FLIGHT,
+	pool_sizes := [?]vk.DescriptorPoolSize{
+		{ type = .UNIFORM_BUFFER, descriptorCount = MAX_FRAMES_IN_FLIGHT },
+		{ type = .COMBINED_IMAGE_SAMPLER, descriptorCount = MAX_FRAMES_IN_FLIGHT },
 	}
 
 	pool_create_info := vk.DescriptorPoolCreateInfo {
 		sType = .DESCRIPTOR_POOL_CREATE_INFO,
-		poolSizeCount = 1,
-		pPoolSizes = &pool_size,
+		poolSizeCount = len(pool_sizes),
+		pPoolSizes = raw_data(&pool_sizes),
 		maxSets = MAX_FRAMES_IN_FLIGHT,
 	}
 
@@ -1019,19 +1035,36 @@ init_renderer_descriptor_sets :: proc(renderer: ^Renderer) -> (ok := false) {
 			range = size_of(MVP_Buffer),
 		}
 
-		descriptor_write := vk.WriteDescriptorSet {
-			sType = .WRITE_DESCRIPTOR_SET,
-			dstSet = renderer.descriptor_sets[i],
-			dstBinding = 0,
-			dstArrayElement = 0,
-			descriptorType = .UNIFORM_BUFFER,
-			descriptorCount = 1,
-			pBufferInfo = &descriptor_buffer_info,
+		descriptor_image_info := vk.DescriptorImageInfo {
+			imageLayout = .SHADER_READ_ONLY_OPTIMAL,
+			imageView = renderer.texture_image_view,
+			sampler = renderer.texture_sampler,
+		}
+
+		descriptor_writes := [2]vk.WriteDescriptorSet{
+			{
+				sType = .WRITE_DESCRIPTOR_SET,
+				dstSet = renderer.descriptor_sets[i],
+				dstBinding = 0,
+				dstArrayElement = 0,
+				descriptorType = .UNIFORM_BUFFER,
+				descriptorCount = 1,
+				pBufferInfo = &descriptor_buffer_info,
+			},
+			{
+				sType = .WRITE_DESCRIPTOR_SET,
+				dstSet = renderer.descriptor_sets[i],
+				dstBinding = 1,
+				dstArrayElement = 0,
+				descriptorType = .COMBINED_IMAGE_SAMPLER,
+				descriptorCount = 1,
+				pImageInfo = &descriptor_image_info,
+			},
 		}
 
 		vk.UpdateDescriptorSets(device = renderer.device,
-					descriptorWriteCount = 1,
-					pDescriptorWrites = &descriptor_write,
+					descriptorWriteCount = len(descriptor_writes),
+					pDescriptorWrites = raw_data(&descriptor_writes),
 					descriptorCopyCount = 0,
 					pDescriptorCopies = nil)
 	}
