@@ -3,7 +3,13 @@ package vulkan_renderer
 import vk "vendor:vulkan"
 import "vendor:glfw"
 import stbi "vendor:stb/image"
+import tinyobj "vendor/tinyobjloader"
 
+import "base:runtime"
+
+import "core:fmt"
+import "core:c"
+import "core:os"
 import "core:log"
 import "core:slice"
 import "core:mem"
@@ -11,7 +17,8 @@ import "core:time"
 import "core:math"
 import "core:math/linalg"
 
-TEXTURE_PATH :: "textures/texture.jpg"
+MODEL_PATH   :: "models/viking_room.obj"
+TEXTURE_PATH :: "textures/viking_room.png"
 
 @(rodata) vertex_shader_bytecode := #load("shaders/shader_vert.spv")
 @(rodata) fragment_shader_bytecode := #load("shaders/shader_frag.spv")
@@ -26,25 +33,6 @@ Vertex :: struct {
 	position: Vec3,
 	color: Vec3,
 	uv: Vec2,
-}
-
-@(rodata)
-rectangle_vertices := []Vertex{
-	{ { -0.5, -0.5,    0 }, { 1, 0, 0 }, { 1, 0 } },
-	{ {  0.5, -0.5,    0 }, { 0, 1, 0 }, { 0, 0 } },
-	{ {  0.5,  0.5,    0 }, { 0, 0, 1 }, { 0, 1 } },
-	{ { -0.5,  0.5,    0 }, { 1, 1, 1 }, { 1, 1 } },
-
-	{ { -0.5, -0.5, -0.5 }, { 1, 0, 0 }, { 1, 0 } },
-	{ {  0.5, -0.5, -0.5 }, { 0, 1, 0 }, { 0, 0 } },
-	{ {  0.5,  0.5, -0.5 }, { 0, 0, 1 }, { 0, 1 } },
-	{ { -0.5,  0.5, -0.5 }, { 1, 1, 1 }, { 1, 1 } },
-}
-
-@(rodata)
-rectangle_indices := []u16{
-	0, 1, 2, 2, 3, 0,
-	4, 5, 6, 6, 7, 4,
 }
 
 get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
@@ -119,6 +107,9 @@ Renderer :: struct {
 	texture_image_memory: vk.DeviceMemory,
 	texture_image_view: vk.ImageView,
 	texture_sampler: vk.Sampler,
+
+	model_vertices: [dynamic]Vertex,
+	model_indices: [dynamic]u32,
 
 	vertex_buffer: vk.Buffer,
 	vertex_buffer_memory: vk.DeviceMemory,
@@ -202,6 +193,9 @@ init_renderer :: proc(renderer: ^Renderer,
 	init_renderer_texture_sampler(renderer) or_return
 	defer if !ok do deinit_renderer_texture_sampler(renderer^)
 
+	init_renderer_model(renderer) or_return
+	defer if !ok do deinit_renderer_model(renderer^)
+
 	init_renderer_vertex_buffer(renderer) or_return
 	defer if !ok do deinit_renderer_vertex_buffer(renderer^)
 
@@ -232,6 +226,7 @@ deinit_renderer :: proc(renderer: Renderer) {
 	deinit_renderer_uniform_buffers(renderer)
 	deinit_renderer_index_buffer(renderer)
 	deinit_renderer_vertex_buffer(renderer)
+	deinit_renderer_model(renderer)
 	deinit_renderer_texture_sampler(renderer)
 	deinit_renderer_texture_image_view(renderer)
 	deinit_renderer_texture_image(renderer)
@@ -904,8 +899,83 @@ deinit_renderer_texture_sampler :: proc(renderer: Renderer) {
 }
 
 @(private="file")
+init_renderer_model :: proc(renderer: ^Renderer) -> (ok := false) {
+	file_reader :: proc "c" (ctx: rawptr,
+				 filename: cstring,
+				 is_mtl: c.int,
+				 obj_filename: cstring,
+				 buf: ^[^]c.char,
+				 buf_len: ^c.size_t) {
+		context = runtime.default_context()
+		data, error := os.read_entire_file(name = cast(string)obj_filename, allocator = context.temp_allocator)
+		if error != nil {
+			fmt.eprintf("Failed to read model file `%v`: %v", obj_filename, error)
+			buf^ = nil
+			buf_len^ = 0
+			return
+		}
+		buf^ = raw_data(data)
+		buf_len^ = len(data)
+		return
+	}
+
+	attrib: tinyobj.attrib_t
+	shapes_data: [^]tinyobj.shape_t
+	num_shapes: uint
+	materials_data: [^]tinyobj.material_t
+	num_materials: uint
+
+	if tinyobj.parse_obj(attrib = &attrib,
+			     shapes = &shapes_data,
+			     num_shapes = &num_shapes,
+			     materials = &materials_data,
+			     num_materials = &num_materials,
+			     file_name = MODEL_PATH,
+			     file_reader = file_reader,
+			     ctx = nil,
+			     flags = tinyobj.FLAG_TRIANGULATE) != tinyobj.SUCCESS {
+		return
+	}
+
+	defer {
+		tinyobj.attrib_free(&attrib)
+		tinyobj.shapes_free(shapes_data, num_shapes)
+		tinyobj.materials_free(materials_data, num_materials)
+	}
+
+	shapes := shapes_data[:num_shapes]
+	materials := materials_data[:num_materials]
+
+	num_triangles := attrib.num_face_num_verts
+	vertices := attrib.faces[:num_triangles * 3]
+	for vertex in vertices {
+		position := Vec3{
+			attrib.vertices[vertex.v_idx * 3 + 0],
+			attrib.vertices[vertex.v_idx * 3 + 1],
+			attrib.vertices[vertex.v_idx * 3 + 2],
+		}
+		color := Vec3{ 1, 1, 1 }
+		uv := Vec2{
+			attrib.texcoords[vertex.vt_idx * 2 + 0],
+			1 - attrib.texcoords[vertex.vt_idx * 2 + 1], // Flip Y.
+		}
+		append(&renderer.model_vertices, Vertex { position, color, uv })
+		append(&renderer.model_indices, cast(u32)len(renderer.model_indices))
+	}
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_model :: proc(renderer: Renderer) {
+	delete(renderer.model_vertices)
+	delete(renderer.model_indices)
+}
+
+@(private="file")
 init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
-	buffer_size := slice.size(rectangle_vertices)
+	buffer_size := slice.size(renderer.model_vertices[:])
 
 	staging_buffer, staging_buffer_memory := create_buffer(renderer.device,
 							       renderer.physical_device,
@@ -921,7 +991,7 @@ init_renderer_vertex_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 		     size = cast(vk.DeviceSize)buffer_size,
 		     flags = {},
 		     ppData = &buffer_data)
-	mem.copy(buffer_data, raw_data(rectangle_vertices), buffer_size)
+	mem.copy(buffer_data, raw_data(renderer.model_vertices), buffer_size)
 	vk.UnmapMemory(renderer.device, staging_buffer_memory)
 
 	renderer.vertex_buffer, renderer.vertex_buffer_memory = create_buffer(renderer.device,
@@ -949,7 +1019,7 @@ deinit_renderer_vertex_buffer :: proc(renderer: Renderer) {
 
 @(private="file")
 init_renderer_index_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
-	buffer_size := slice.size(rectangle_indices)
+	buffer_size := slice.size(renderer.model_indices[:])
 
 	staging_buffer, staging_buffer_memory := create_buffer(renderer.device,
 							       renderer.physical_device,
@@ -965,7 +1035,7 @@ init_renderer_index_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 		     size = cast(vk.DeviceSize)buffer_size,
 		     flags = {},
 		     ppData = &buffer_data)
-	mem.copy(buffer_data, raw_data(rectangle_indices), buffer_size)
+	mem.copy(buffer_data, raw_data(renderer.model_indices), buffer_size)
 	vk.UnmapMemory(renderer.device, staging_buffer_memory)
 
 	renderer.index_buffer, renderer.index_buffer_memory = create_buffer(renderer.device,
@@ -1556,7 +1626,7 @@ renderer_record_command_buffer :: proc(renderer: Renderer, swap_chain_image_inde
 	vk.CmdBindIndexBuffer(commandBuffer = command_buffer,
 			      buffer = renderer.index_buffer,
 			      offset = 0,
-			      indexType = .UINT16)
+			      indexType = .UINT32)
 
 	vk.CmdBindDescriptorSets(commandBuffer = command_buffer,
 				 pipelineBindPoint = .GRAPHICS,
@@ -1567,7 +1637,7 @@ renderer_record_command_buffer :: proc(renderer: Renderer, swap_chain_image_inde
 				 dynamicOffsetCount = 0,
 				 pDynamicOffsets = nil)
 	vk.CmdDrawIndexed(commandBuffer = command_buffer,
-			  indexCount = cast(u32)len(rectangle_indices),
+			  indexCount = cast(u32)len(renderer.model_indices),
 			  instanceCount = 1,
 			  firstIndex = 0,
 			  vertexOffset = 0,
@@ -1591,7 +1661,7 @@ renderer_update_uniform_buffer :: proc(renderer: Renderer, buffer_mapped: rawptr
 	aspect_ratio := f32(renderer.swap_chain_extent.width) / f32(renderer.swap_chain_extent.height)
 
 	mvp_buffer := MVP_Buffer {
-		model = linalg.matrix4_rotate(elapsed_seconds * math.to_radians(f32(90)), Vec3{ 0, 0, 1 }),
+		model = linalg.matrix4_rotate(elapsed_seconds * 0.3 * math.to_radians(f32(90)), Vec3{ 0, 0, 1 }),
 		view = linalg.matrix4_look_at(eye = Vec3{ 2, 2, 2 },
 					      centre = Vec3{ 0, 0, 0 },
 					      up = Vec3{ 0, 0, 1 }),
