@@ -151,7 +151,10 @@ copy_buffer_to_image :: proc(device: vk.Device,
 	submit_single_time_commands(command_buffer, queue, device, command_pool)
 }
 
-create_image_view :: proc(device: vk.Device, image: vk.Image, format: vk.Format) -> (view: vk.ImageView, ok := false) {
+create_image_view :: proc(device: vk.Device,
+			  image: vk.Image,
+			  format: vk.Format,
+			  aspect: vk.ImageAspectFlags) -> (view: vk.ImageView, ok := false) {
 	image_view_create_info := vk.ImageViewCreateInfo {
 		sType = .IMAGE_VIEW_CREATE_INFO,
 		image = image,
@@ -159,7 +162,7 @@ create_image_view :: proc(device: vk.Device, image: vk.Image, format: vk.Format)
 		format = format,
 		components = { .IDENTITY, .IDENTITY, .IDENTITY, .IDENTITY },
 		subresourceRange = {
-			aspectMask = { .COLOR },
+			aspectMask = aspect,
 			baseMipLevel = 0,
 			levelCount = 1,
 			baseArrayLayer = 0,
@@ -175,4 +178,18 @@ create_image_view :: proc(device: vk.Device, image: vk.Image, format: vk.Format)
 
 destroy_image_view :: proc(device: vk.Device, view: vk.ImageView) {
 	vk.DestroyImageView(device, view, nil)
+}
+
+find_supported_format :: proc(physical_device: vk.PhysicalDevice,
+			      candidates: []vk.Format,
+			      tiling: vk.ImageTiling,
+			      features: vk.FormatFeatureFlags) -> (vk.Format, bool) {
+	for format in candidates {
+		format_properties: vk.FormatProperties
+		vk.GetPhysicalDeviceFormatProperties(physical_device, format, &format_properties)
+		if tiling == .LINEAR && (features <= format_properties.linearTilingFeatures) do return format, true
+		if tiling == .OPTIMAL && (features <= format_properties.optimalTilingFeatures) do return format, true
+	}
+
+	return {}, false
 }

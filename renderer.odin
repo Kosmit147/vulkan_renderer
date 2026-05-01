@@ -23,21 +23,29 @@ Vec4 :: [4]f32
 Mat4 :: matrix[4, 4]f32
 
 Vertex :: struct {
-	position: Vec2,
+	position: Vec3,
 	color: Vec3,
 	uv: Vec2,
 }
 
 @(rodata)
 rectangle_vertices := []Vertex{
-	{ { -0.5, -0.5 }, { 1, 0, 0 }, { 1, 0 } },
-	{ {  0.5, -0.5 }, { 0, 1, 0 }, { 0, 0 } },
-	{ {  0.5,  0.5 }, { 0, 0, 1 }, { 0, 1 } },
-	{ { -0.5,  0.5 }, { 1, 1, 1 }, { 1, 1 } },
+	{ { -0.5, -0.5,    0 }, { 1, 0, 0 }, { 1, 0 } },
+	{ {  0.5, -0.5,    0 }, { 0, 1, 0 }, { 0, 0 } },
+	{ {  0.5,  0.5,    0 }, { 0, 0, 1 }, { 0, 1 } },
+	{ { -0.5,  0.5,    0 }, { 1, 1, 1 }, { 1, 1 } },
+
+	{ { -0.5, -0.5, -0.5 }, { 1, 0, 0 }, { 1, 0 } },
+	{ {  0.5, -0.5, -0.5 }, { 0, 1, 0 }, { 0, 0 } },
+	{ {  0.5,  0.5, -0.5 }, { 0, 0, 1 }, { 0, 1 } },
+	{ { -0.5,  0.5, -0.5 }, { 1, 1, 1 }, { 1, 1 } },
 }
 
 @(rodata)
-rectangle_indices := []u16{ 0, 1, 2, 2, 3, 0 }
+rectangle_indices := []u16{
+	0, 1, 2, 2, 3, 0,
+	4, 5, 6, 6, 7, 4,
+}
 
 get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
 	return vk.VertexInputBindingDescription{
@@ -52,7 +60,7 @@ get_vertex_attribute_descriptions :: proc() -> [3]vk.VertexInputAttributeDescrip
 		vk.VertexInputAttributeDescription{
 			binding = 0,
 			location = 0,
-			format = .R32G32_SFLOAT,
+			format = .R32G32B32_SFLOAT,
 			offset = cast(u32)offset_of(Vertex, position),
 		},
 		vk.VertexInputAttributeDescription{
@@ -102,6 +110,10 @@ Renderer :: struct {
 
 	command_pool: vk.CommandPool,
 	command_buffers: [dynamic]vk.CommandBuffer,
+
+	depth_image: vk.Image,
+	depth_image_memory: vk.DeviceMemory,
+	depth_image_view: vk.ImageView,
 
 	texture_image: vk.Image,
 	texture_image_memory: vk.DeviceMemory,
@@ -172,11 +184,14 @@ init_renderer :: proc(renderer: ^Renderer,
 	init_renderer_graphics_pipeline(renderer) or_return
 	defer if !ok do deinit_renderer_graphics_pipeline(renderer^)
 
-	init_renderer_framebuffers(renderer) or_return
-	defer if !ok do deinit_renderer_framebuffers(renderer^)
-
 	init_renderer_command_buffers(renderer) or_return
 	defer if !ok do deinit_renderer_command_buffers(renderer^)
+
+	init_renderer_depth_buffer(renderer) or_return
+	defer if !ok do deinit_renderer_depth_buffer(renderer^)
+
+	init_renderer_framebuffers(renderer) or_return
+	defer if !ok do deinit_renderer_framebuffers(renderer^)
 
 	init_renderer_texture_image(renderer) or_return
 	defer if !ok do deinit_renderer_texture_image(renderer^)
@@ -220,8 +235,9 @@ deinit_renderer :: proc(renderer: Renderer) {
 	deinit_renderer_texture_sampler(renderer)
 	deinit_renderer_texture_image_view(renderer)
 	deinit_renderer_texture_image(renderer)
-	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_framebuffers(renderer)
+	deinit_renderer_depth_buffer(renderer)
+	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
 	deinit_renderer_descriptor_set_layout(renderer)
 	deinit_renderer_render_pass(renderer)
@@ -465,7 +481,10 @@ init_renderer_swap_chain :: proc(renderer: ^Renderer) -> (ok := false) {
 		delete(renderer.swap_chain_image_views)
 	}
 	for image in renderer.swap_chain_images {
-		image_view := create_image_view(renderer.device, image, renderer.swap_chain_image_format) or_return
+		image_view := create_image_view(renderer.device,
+						image,
+						renderer.swap_chain_image_format,
+						{ .COLOR }) or_return
 		append(&renderer.swap_chain_image_views, image_view)
 	}
 	assert(len(renderer.swap_chain_images) == len(renderer.swap_chain_image_views))
@@ -500,16 +519,35 @@ init_renderer_render_pass :: proc(renderer: ^Renderer) -> (ok := false) {
 		layout = .COLOR_ATTACHMENT_OPTIMAL,
 	}
 
+	depth_attachment_description := vk.AttachmentDescription {
+		format = find_depth_format(renderer.physical_device) or_return,
+		samples = { ._1 },
+		loadOp = .CLEAR,
+		storeOp = .DONT_CARE,
+		stencilLoadOp = .DONT_CARE,
+		stencilStoreOp = .DONT_CARE,
+		initialLayout = .UNDEFINED,
+		finalLayout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+	}
+
+	depth_attachment_ref := vk.AttachmentReference {
+		attachment = 1,
+		layout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+	}
+
 	subpass_description := vk.SubpassDescription {
 		pipelineBindPoint = .GRAPHICS,
 		colorAttachmentCount = 1,
 		pColorAttachments = &color_attachment_ref,
+		pDepthStencilAttachment = &depth_attachment_ref,
 	}
+
+	attachments := [?]vk.AttachmentDescription{ color_attachment_description, depth_attachment_description }
 
 	render_pass_create_info := vk.RenderPassCreateInfo {
 		sType = .RENDER_PASS_CREATE_INFO,
-		attachmentCount = 1,
-		pAttachments = &color_attachment_description,
+		attachmentCount = len(attachments),
+		pAttachments = raw_data(&attachments),
 		subpassCount = 1,
 		pSubpasses = &subpass_description,
 	}
@@ -641,6 +679,17 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 		pAttachments = &pipeline_color_blend_attachment_state,
 	}
 
+	pipeline_depth_stencil_state_create_info := vk.PipelineDepthStencilStateCreateInfo {
+		sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		depthTestEnable = true,
+		depthWriteEnable = true,
+		depthCompareOp = .LESS,
+		depthBoundsTestEnable = false,
+		minDepthBounds = 0,
+		maxDepthBounds = 1,
+		stencilTestEnable = false,
+	}
+
 	dynamic_states := [2]vk.DynamicState { .VIEWPORT, .SCISSOR }
 	pipeline_dynamic_state_create_info := vk.PipelineDynamicStateCreateInfo {
 		sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -671,7 +720,7 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 		pViewportState = &pipeline_viewport_state_create_info,
 		pRasterizationState = &pipeline_rasterization_state_create_info,
 		pMultisampleState = &pipeline_multisample_state_create_info,
-		pDepthStencilState = nil,
+		pDepthStencilState = &pipeline_depth_stencil_state_create_info,
 		pColorBlendState = &pipeline_color_blend_state_create_info,
 		pDynamicState = &pipeline_dynamic_state_create_info,
 		layout = renderer.pipeline_layout,
@@ -708,11 +757,13 @@ init_renderer_framebuffers :: proc(renderer: ^Renderer) -> (ok := false) {
 	}
 
 	for &image_view in renderer.swap_chain_image_views {
+		attachments := [?]vk.ImageView{ image_view, renderer.depth_image_view }
+
 		framebuffer_create_info := vk.FramebufferCreateInfo {
 			sType = .FRAMEBUFFER_CREATE_INFO,
 			renderPass = renderer.render_pass,
-			attachmentCount = 1,
-			pAttachments = &image_view,
+			attachmentCount = len(attachments),
+			pAttachments = raw_data(&attachments),
 			width = renderer.swap_chain_extent.width,
 			height = renderer.swap_chain_extent.height,
 			layers = 1,
@@ -807,7 +858,10 @@ deinit_renderer_texture_image :: proc(renderer: Renderer) {
 
 @(private="file")
 init_renderer_texture_image_view :: proc(renderer: ^Renderer) -> (ok := false) {
-	renderer.texture_image_view = create_image_view(renderer.device, renderer.texture_image, .R8G8B8A8_SRGB) or_return
+	renderer.texture_image_view = create_image_view(renderer.device,
+							renderer.texture_image,
+							.R8G8B8A8_SRGB,
+							{ .COLOR }) or_return
 	ok = true
 	return
 }
@@ -1117,6 +1171,56 @@ deinit_renderer_command_buffers :: proc(renderer: Renderer) {
 }
 
 @(private="file")
+init_renderer_depth_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
+	depth_format := find_depth_format(renderer.physical_device) or_return
+
+	renderer.depth_image, renderer.depth_image_memory = create_image(renderer.device,
+									 renderer.physical_device,
+									 renderer.swap_chain_extent.width,
+									 renderer.swap_chain_extent.height,
+									 depth_format,
+									 .OPTIMAL,
+									 { .DEPTH_STENCIL_ATTACHMENT },
+									 { .DEVICE_LOCAL }) or_return
+	defer if !ok do destroy_image(renderer.device, renderer.depth_image, renderer.depth_image_memory)
+
+	renderer.depth_image_view = create_image_view(renderer.device,
+						      renderer.depth_image,
+						      depth_format,
+						      { .DEPTH }) or_return
+	defer if !ok do destroy_image_view(renderer.device, renderer.depth_image_view)
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_depth_buffer :: proc(renderer: Renderer) {
+	destroy_image_view(renderer.device, renderer.depth_image_view)
+	destroy_image(renderer.device, renderer.depth_image, renderer.depth_image_memory)
+}
+
+@(private="file")
+find_depth_format :: proc(physical_device: vk.PhysicalDevice) -> (vk.Format, bool) {
+	@(static, rodata)
+	candidates := []vk.Format{
+		.D32_SFLOAT,
+		.D32_SFLOAT_S8_UINT,
+		.D24_UNORM_S8_UINT,
+	}
+
+	return find_supported_format(physical_device,
+				     candidates,
+				     .OPTIMAL,
+				     { .DEPTH_STENCIL_ATTACHMENT })
+}
+
+@(private="file")
+format_has_stencil_component :: proc(format: vk.Format) -> bool {
+	return format == .D32_SFLOAT_S8_UINT || format == .D24_UNORM_S8_UINT
+}
+
+@(private="file")
 init_renderer_synchronization_primitives :: proc(renderer: ^Renderer) -> (ok := false) {
 	semaphore_create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
 
@@ -1304,7 +1408,7 @@ device_suitable :: proc(physical_device: vk.PhysicalDevice,
 }
 
 @(private="file")
-recreate_swap_chain :: proc(renderer: ^Renderer) {
+renderer_recreate_swap_chain :: proc(renderer: ^Renderer) {
 	width, height := glfw.GetFramebufferSize(renderer.window)
 	for width == 0 || height == 0 {
 		glfw.WaitEvents()
@@ -1312,9 +1416,13 @@ recreate_swap_chain :: proc(renderer: ^Renderer) {
 	}
 	renderer.should_recreate_swap_chain = false
 	vk.DeviceWaitIdle(renderer.device)
+
 	deinit_renderer_framebuffers(renderer^)
+	deinit_renderer_depth_buffer(renderer^)
 	deinit_renderer_swap_chain(renderer^)
+
 	init_renderer_swap_chain(renderer)
+	init_renderer_depth_buffer(renderer)
 	init_renderer_framebuffers(renderer)
 }
 
@@ -1397,7 +1505,10 @@ renderer_record_command_buffer :: proc(renderer: Renderer, swap_chain_image_inde
 	command_buffer_begin_info := vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO }
 	if vk.BeginCommandBuffer(command_buffer, &command_buffer_begin_info) != .SUCCESS do return
 
-	clear_color := vk.ClearValue { color = { float32 = { 0, 0, 0, 1 } } }
+	clear_values := [?]vk.ClearValue{
+		{ color = { float32 = { 0, 0, 0, 1 } } },
+		{ depthStencil = { 1, 0 } }
+	}
 	render_pass_begin_info := vk.RenderPassBeginInfo {
 		sType = .RENDER_PASS_BEGIN_INFO,
 		renderPass = renderer.render_pass,
@@ -1406,8 +1517,8 @@ renderer_record_command_buffer :: proc(renderer: Renderer, swap_chain_image_inde
 			offset = { 0, 0 },
 			extent = renderer.swap_chain_extent,
 		},
-		clearValueCount = 1,
-		pClearValues = &clear_color,
+		clearValueCount = len(clear_values),
+		pClearValues = raw_data(&clear_values),
 	}
 
 	vk.CmdBeginRenderPass(command_buffer, &render_pass_begin_info, .INLINE)
@@ -1510,7 +1621,7 @@ renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
 						    fence = vk.Fence(0),
 						    pImageIndex = &swap_chain_image_index)
 	if next_image_result == .ERROR_OUT_OF_DATE_KHR {
-		recreate_swap_chain(renderer)
+		renderer_recreate_swap_chain(renderer)
 		ok = true
 		return
 	} else if next_image_result != .SUCCESS && next_image_result != .SUBOPTIMAL_KHR {
@@ -1553,7 +1664,7 @@ renderer_render :: proc(renderer: ^Renderer) -> (ok := false) {
 	present_result := vk.QueuePresentKHR(renderer.presentation_queue, &presentation_info)
 
 	if present_result == .ERROR_OUT_OF_DATE_KHR || present_result == .SUBOPTIMAL_KHR || renderer.should_recreate_swap_chain {
-		recreate_swap_chain(renderer)
+		renderer_recreate_swap_chain(renderer)
 	} else if present_result != .SUCCESS {
 		log.errorf("Failed to present swapchain image!")
 		return
