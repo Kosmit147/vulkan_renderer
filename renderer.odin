@@ -947,20 +947,30 @@ init_renderer_model :: proc(renderer: ^Renderer) -> (ok := false) {
 	materials := materials_data[:num_materials]
 
 	num_triangles := attrib.num_face_num_verts
-	vertices := attrib.faces[:num_triangles * 3]
-	for vertex in vertices {
-		position := Vec3{
-			attrib.vertices[vertex.v_idx * 3 + 0],
-			attrib.vertices[vertex.v_idx * 3 + 1],
-			attrib.vertices[vertex.v_idx * 3 + 2],
+	model_vertices := attrib.faces[:num_triangles * 3]
+	unique_vertex_indices := make(map[Vertex]u32, context.temp_allocator)
+	for vertex in model_vertices {
+		vertex := Vertex {
+			position = Vec3{
+				attrib.vertices[vertex.v_idx * 3 + 0],
+				attrib.vertices[vertex.v_idx * 3 + 1],
+				attrib.vertices[vertex.v_idx * 3 + 2],
+			},
+			color = Vec3{ 1, 1, 1 },
+			uv = Vec2{
+				attrib.texcoords[vertex.vt_idx * 2 + 0],
+				1 - attrib.texcoords[vertex.vt_idx * 2 + 1], // Flip Y.
+			},
 		}
-		color := Vec3{ 1, 1, 1 }
-		uv := Vec2{
-			attrib.texcoords[vertex.vt_idx * 2 + 0],
-			1 - attrib.texcoords[vertex.vt_idx * 2 + 1], // Flip Y.
+
+		if vertex_index, vertex_index_ok := unique_vertex_indices[vertex]; vertex_index_ok {
+			append(&renderer.model_indices, vertex_index)
+		} else {
+			vertex_index = cast(u32)len(unique_vertex_indices)
+			unique_vertex_indices[vertex] = vertex_index
+			append(&renderer.model_vertices, vertex)
+			append(&renderer.model_indices, vertex_index)
 		}
-		append(&renderer.model_vertices, Vertex { position, color, uv })
-		append(&renderer.model_indices, cast(u32)len(renderer.model_indices))
 	}
 
 	ok = true
