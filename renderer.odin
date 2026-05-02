@@ -78,6 +78,8 @@ Renderer :: struct {
 	physical_device: vk.PhysicalDevice,
 	device: vk.Device,
 	physical_device_properties: vk.PhysicalDeviceProperties,
+	msaa_samples: vk.SampleCountFlag,
+
 	graphics_queue_family_index: u32,
 	graphics_queue: vk.Queue,
 	presentation_queue_family_index: u32,
@@ -98,6 +100,10 @@ Renderer :: struct {
 
 	command_pool: vk.CommandPool,
 	command_buffers: [dynamic]vk.CommandBuffer,
+
+	color_image: vk.Image,
+	color_image_memory: vk.DeviceMemory,
+	color_image_view: vk.ImageView,
 
 	depth_image: vk.Image,
 	depth_image_memory: vk.DeviceMemory,
@@ -179,6 +185,9 @@ init_renderer :: proc(renderer: ^Renderer,
 	init_renderer_command_buffers(renderer) or_return
 	defer if !ok do deinit_renderer_command_buffers(renderer^)
 
+	init_renderer_color_buffer(renderer) or_return
+	defer if !ok do deinit_renderer_color_buffer(renderer^)
+
 	init_renderer_depth_buffer(renderer) or_return
 	defer if !ok do deinit_renderer_depth_buffer(renderer^)
 
@@ -233,6 +242,7 @@ deinit_renderer :: proc(renderer: Renderer) {
 	deinit_renderer_texture_image(renderer)
 	deinit_renderer_framebuffers(renderer)
 	deinit_renderer_depth_buffer(renderer)
+	deinit_renderer_color_buffer(renderer)
 	deinit_renderer_command_buffers(renderer)
 	deinit_renderer_graphics_pipeline(renderer)
 	deinit_renderer_descriptor_set_layout(renderer)
@@ -333,6 +343,7 @@ init_renderer_device :: proc(renderer: ^Renderer,
 		if device_suitable(device, extensions, renderer.window, renderer.surface) {
 			renderer.physical_device = device
 			vk.GetPhysicalDeviceProperties(renderer.physical_device, &renderer.physical_device_properties)
+			renderer.msaa_samples = get_max_usable_sample_count(renderer.physical_device_properties)
 			suitable_physical_device_found = true
 			break
 		}
@@ -389,6 +400,7 @@ init_renderer_device :: proc(renderer: ^Renderer,
 
 	physical_device_features := vk.PhysicalDeviceFeatures{}
 	physical_device_features.samplerAnisotropy = true
+	physical_device_features.sampleRateShading = true
 
 	device_create_info := vk.DeviceCreateInfo {
 		sType = .DEVICE_CREATE_INFO,
@@ -502,13 +514,13 @@ deinit_renderer_swap_chain :: proc(renderer: Renderer) {
 init_renderer_render_pass :: proc(renderer: ^Renderer) -> (ok := false) {
 	color_attachment_description := vk.AttachmentDescription {
 		format = renderer.swap_chain_image_format,
-		samples = { ._1 },
+		samples = { renderer.msaa_samples },
 		loadOp = .CLEAR,
 		storeOp = .STORE,
 		stencilLoadOp = .DONT_CARE,
 		stencilStoreOp = .DONT_CARE,
 		initialLayout = .UNDEFINED,
-		finalLayout = .PRESENT_SRC_KHR,
+		finalLayout = .COLOR_ATTACHMENT_OPTIMAL,
 	}
 
 	color_attachment_ref := vk.AttachmentReference {
@@ -518,7 +530,7 @@ init_renderer_render_pass :: proc(renderer: ^Renderer) -> (ok := false) {
 
 	depth_attachment_description := vk.AttachmentDescription {
 		format = find_depth_format(renderer.physical_device) or_return,
-		samples = { ._1 },
+		samples = { renderer.msaa_samples },
 		loadOp = .CLEAR,
 		storeOp = .DONT_CARE,
 		stencilLoadOp = .DONT_CARE,
@@ -532,14 +544,35 @@ init_renderer_render_pass :: proc(renderer: ^Renderer) -> (ok := false) {
 		layout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 	}
 
+	color_resolve_attachment_description := vk.AttachmentDescription {
+		format = renderer.swap_chain_image_format,
+		samples = { ._1 },
+		loadOp = .DONT_CARE,
+		storeOp = .STORE,
+		stencilLoadOp = .DONT_CARE,
+		stencilStoreOp = .DONT_CARE,
+		initialLayout = .UNDEFINED,
+		finalLayout = .PRESENT_SRC_KHR,
+	}
+
+	color_resolve_attachment_ref := vk.AttachmentReference {
+		attachment = 2,
+		layout = .COLOR_ATTACHMENT_OPTIMAL,
+	}
+
 	subpass_description := vk.SubpassDescription {
 		pipelineBindPoint = .GRAPHICS,
 		colorAttachmentCount = 1,
 		pColorAttachments = &color_attachment_ref,
 		pDepthStencilAttachment = &depth_attachment_ref,
+		pResolveAttachments = &color_resolve_attachment_ref,
 	}
 
-	attachments := [?]vk.AttachmentDescription{ color_attachment_description, depth_attachment_description }
+	attachments := [?]vk.AttachmentDescription{
+		color_attachment_description,
+		depth_attachment_description,
+		color_resolve_attachment_description
+	}
 
 	render_pass_create_info := vk.RenderPassCreateInfo {
 		sType = .RENDER_PASS_CREATE_INFO,
@@ -661,8 +694,9 @@ init_renderer_graphics_pipeline :: proc(renderer: ^Renderer) -> (ok := false) {
 
 	pipeline_multisample_state_create_info := vk.PipelineMultisampleStateCreateInfo {
 		sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-		sampleShadingEnable = false,
-		rasterizationSamples = { ._1 },
+		sampleShadingEnable = true,
+		minSampleShading = 0.2,
+		rasterizationSamples = { renderer.msaa_samples },
 	}
 
 	pipeline_color_blend_attachment_state := vk.PipelineColorBlendAttachmentState {
@@ -754,7 +788,7 @@ init_renderer_framebuffers :: proc(renderer: ^Renderer) -> (ok := false) {
 	}
 
 	for &image_view in renderer.swap_chain_image_views {
-		attachments := [?]vk.ImageView{ image_view, renderer.depth_image_view }
+		attachments := [?]vk.ImageView{ renderer.color_image_view, renderer.depth_image_view, image_view }
 
 		framebuffer_create_info := vk.FramebufferCreateInfo {
 			sType = .FRAMEBUFFER_CREATE_INFO,
@@ -821,6 +855,7 @@ init_renderer_texture_image :: proc(renderer: ^Renderer) -> (ok := false) {
 									     mip_levels = renderer.texture_image_mip_levels,
 		     							     format = .R8G8B8A8_SRGB,
 		     							     tiling = .OPTIMAL,
+									     samples = ._1,
 		     							     usage = { .TRANSFER_SRC, .TRANSFER_DST, .SAMPLED },
 		     							     memory_properties = { .DEVICE_LOCAL }) or_return
 	defer if !ok do destroy_image(renderer.device, renderer.texture_image, renderer.texture_image_memory)
@@ -1262,6 +1297,39 @@ deinit_renderer_command_buffers :: proc(renderer: Renderer) {
 }
 
 @(private="file")
+init_renderer_color_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
+	color_format := renderer.swap_chain_image_format
+
+	renderer.color_image, renderer.color_image_memory = create_image(renderer.device,
+									 renderer.physical_device,
+									 renderer.swap_chain_extent.width,
+									 renderer.swap_chain_extent.height,
+									 1,
+									 color_format,
+									 .OPTIMAL,
+									 renderer.msaa_samples,
+									 { .COLOR_ATTACHMENT },
+									 { .DEVICE_LOCAL }) or_return
+	defer if !ok do destroy_image(renderer.device, renderer.color_image, renderer.color_image_memory)
+
+	renderer.color_image_view = create_image_view(renderer.device,
+						      renderer.color_image,
+						      color_format,
+						      1,
+						      { .COLOR }) or_return
+	defer if !ok do destroy_image_view(renderer.device, renderer.color_image_view)
+
+	ok = true
+	return
+}
+
+@(private="file")
+deinit_renderer_color_buffer :: proc(renderer: Renderer) {
+	destroy_image_view(renderer.device, renderer.color_image_view)
+	destroy_image(renderer.device, renderer.color_image, renderer.color_image_memory)
+}
+
+@(private="file")
 init_renderer_depth_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 	depth_format := find_depth_format(renderer.physical_device) or_return
 
@@ -1272,6 +1340,7 @@ init_renderer_depth_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 									 1,
 									 depth_format,
 									 .OPTIMAL,
+									 renderer.msaa_samples,
 									 { .DEPTH_STENCIL_ATTACHMENT },
 									 { .DEVICE_LOCAL }) or_return
 	defer if !ok do destroy_image(renderer.device, renderer.depth_image, renderer.depth_image_memory)
@@ -1501,6 +1570,18 @@ device_suitable :: proc(physical_device: vk.PhysicalDevice,
 }
 
 @(private="file")
+get_max_usable_sample_count :: proc(physical_device_properties: vk.PhysicalDeviceProperties) -> (count := vk.SampleCountFlag._1) {
+	counts := physical_device_properties.limits.framebufferColorSampleCounts &
+		  physical_device_properties.limits.framebufferDepthSampleCounts
+
+	for c in vk.SampleCountFlag {
+		if c in counts do count = c
+	}
+
+	return
+}
+
+@(private="file")
 renderer_recreate_swap_chain :: proc(renderer: ^Renderer) {
 	width, height := glfw.GetFramebufferSize(renderer.window)
 	for width == 0 || height == 0 {
@@ -1512,9 +1593,11 @@ renderer_recreate_swap_chain :: proc(renderer: ^Renderer) {
 
 	deinit_renderer_framebuffers(renderer^)
 	deinit_renderer_depth_buffer(renderer^)
+	deinit_renderer_color_buffer(renderer^)
 	deinit_renderer_swap_chain(renderer^)
 
 	init_renderer_swap_chain(renderer)
+	init_renderer_color_buffer(renderer)
 	init_renderer_depth_buffer(renderer)
 	init_renderer_framebuffers(renderer)
 }

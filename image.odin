@@ -8,6 +8,7 @@ create_image :: proc(device: vk.Device,
 		     mip_levels: u32,
 		     format: vk.Format,
 		     tiling: vk.ImageTiling,
+		     samples: vk.SampleCountFlag,
 		     usage: vk.ImageUsageFlags,
 		     memory_properties: vk.MemoryPropertyFlags) -> (image: vk.Image,
 								    image_memory: vk.DeviceMemory,
@@ -27,7 +28,7 @@ create_image :: proc(device: vk.Device,
 		initialLayout = .UNDEFINED,
 		usage = usage,
 		sharingMode = .EXCLUSIVE,
-		samples = { ._1 },
+		samples = { samples },
 	}
 
 	if vk.CreateImage(device, &image_create_info, nil, &image) != .SUCCESS do return
