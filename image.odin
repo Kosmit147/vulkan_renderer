@@ -5,6 +5,7 @@ import vk "vendor:vulkan"
 create_image :: proc(device: vk.Device,
 		     physical_device: vk.PhysicalDevice,
 		     width, height: u32,
+		     mip_levels: u32,
 		     format: vk.Format,
 		     tiling: vk.ImageTiling,
 		     usage: vk.ImageUsageFlags,
@@ -19,7 +20,7 @@ create_image :: proc(device: vk.Device,
 			height = height,
 			depth = 1,
 		},
-		mipLevels = 1,
+		mipLevels = mip_levels,
 		arrayLayers = 1,
 		format = format,
 		tiling = tiling,
@@ -63,6 +64,7 @@ transition_image_layout :: proc(device: vk.Device,
 				queue: vk.Queue,
 				image: vk.Image,
 				format: vk.Format,
+				mip_levels: u32,
 				old_layout: vk.ImageLayout,
 				new_layout: vk.ImageLayout) {
 	command_buffer := begin_single_time_commands(device, command_pool)
@@ -94,7 +96,7 @@ transition_image_layout :: proc(device: vk.Device,
 		subresourceRange = {
 			aspectMask = { .COLOR },
 			baseMipLevel = 0,
-			levelCount = 1,
+			levelCount = mip_levels,
 			baseArrayLayer = 0,
 			layerCount = 1,
 		},
@@ -154,6 +156,7 @@ copy_buffer_to_image :: proc(device: vk.Device,
 create_image_view :: proc(device: vk.Device,
 			  image: vk.Image,
 			  format: vk.Format,
+			  mip_levels: u32,
 			  aspect: vk.ImageAspectFlags) -> (view: vk.ImageView, ok := false) {
 	image_view_create_info := vk.ImageViewCreateInfo {
 		sType = .IMAGE_VIEW_CREATE_INFO,
@@ -164,7 +167,7 @@ create_image_view :: proc(device: vk.Device,
 		subresourceRange = {
 			aspectMask = aspect,
 			baseMipLevel = 0,
-			levelCount = 1,
+			levelCount = mip_levels,
 			baseArrayLayer = 0,
 			layerCount = 1,
 		}
@@ -192,4 +195,126 @@ find_supported_format :: proc(physical_device: vk.PhysicalDevice,
 	}
 
 	return {}, false
+}
+
+generate_mipmaps :: proc(device: vk.Device,
+			 physical_device: vk.PhysicalDevice,
+			 command_pool: vk.CommandPool,
+			 queue: vk.Queue,
+			 image: vk.Image,
+			 image_format: vk.Format,
+			 width, height: u32,
+			 mip_levels: u32) -> (ok := false) {
+	format_properties: vk.FormatProperties
+	vk.GetPhysicalDeviceFormatProperties(physical_device, image_format, &format_properties)
+	if .SAMPLED_IMAGE_FILTER_LINEAR not_in format_properties.optimalTilingFeatures do return
+
+	command_buffer := begin_single_time_commands(device, command_pool)
+
+	barrier := vk.ImageMemoryBarrier {
+		sType = .IMAGE_MEMORY_BARRIER,
+		image = image,
+		srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+		dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+		subresourceRange = {
+			aspectMask = { .COLOR },
+			baseArrayLayer = 0,
+			layerCount = 1,
+			levelCount = 1,
+		}
+	}
+
+	mip_width, mip_height := width, height
+
+	for i := u32(1); i < mip_levels; i += 1 {
+		barrier.subresourceRange.baseMipLevel = i - 1
+		barrier.oldLayout = .TRANSFER_DST_OPTIMAL
+		barrier.newLayout = .TRANSFER_SRC_OPTIMAL
+		barrier.srcAccessMask = { .TRANSFER_WRITE }
+		barrier.dstAccessMask = { .TRANSFER_READ }
+
+		vk.CmdPipelineBarrier(commandBuffer = command_buffer,
+				      srcStageMask = { .TRANSFER },
+				      dstStageMask = { .TRANSFER },
+				      dependencyFlags = {},
+				      memoryBarrierCount = 0,
+				      pMemoryBarriers = nil,
+				      bufferMemoryBarrierCount = 0,
+				      pBufferMemoryBarriers = nil,
+				      imageMemoryBarrierCount = 1,
+				      pImageMemoryBarriers = &barrier)
+
+		image_blit := vk.ImageBlit {
+			srcOffsets = {
+				{ 0, 0, 0 },
+				{ i32(mip_width), i32(mip_height), 1 },
+			},
+			srcSubresource = {
+				aspectMask = { .COLOR },
+				mipLevel = i - 1,
+				baseArrayLayer = 0,
+				layerCount = 1,
+			},
+			dstOffsets = {
+				{ 0, 0, 0 },
+				{ i32(mip_width) / 2 if mip_width > 1 else 1, i32(mip_height) / 2 if mip_height > 1 else 1, 1 }
+			},
+			dstSubresource = {
+				aspectMask = { .COLOR },
+				mipLevel = i,
+				baseArrayLayer = 0,
+				layerCount = 1,
+			}
+		}
+
+		vk.CmdBlitImage(commandBuffer = command_buffer,
+				srcImage = image,
+				srcImageLayout = .TRANSFER_SRC_OPTIMAL,
+				dstImage = image,
+				dstImageLayout = .TRANSFER_DST_OPTIMAL,
+				regionCount = 1,
+				pRegions = &image_blit,
+				filter = .LINEAR)
+
+		barrier.oldLayout = .TRANSFER_SRC_OPTIMAL
+		barrier.newLayout = .SHADER_READ_ONLY_OPTIMAL
+		barrier.srcAccessMask = { .TRANSFER_READ }
+		barrier.dstAccessMask = { .SHADER_READ }
+
+		vk.CmdPipelineBarrier(commandBuffer = command_buffer,
+				      srcStageMask = { .TRANSFER },
+				      dstStageMask = { .FRAGMENT_SHADER },
+				      dependencyFlags = {},
+				      memoryBarrierCount = 0,
+				      pMemoryBarriers = nil,
+				      bufferMemoryBarrierCount = 0,
+				      pBufferMemoryBarriers = nil,
+				      imageMemoryBarrierCount = 1,
+				      pImageMemoryBarriers = &barrier)
+
+		if mip_width > 1 do mip_width /= 2
+		if mip_height > 1 do mip_height /= 2
+	}
+
+	barrier.subresourceRange.baseMipLevel = mip_levels - 1
+	barrier.oldLayout = .TRANSFER_DST_OPTIMAL
+	barrier.newLayout = .SHADER_READ_ONLY_OPTIMAL
+	barrier.srcAccessMask = { .TRANSFER_WRITE }
+	barrier.dstAccessMask = { .SHADER_READ }
+
+	vk.CmdPipelineBarrier(commandBuffer = command_buffer,
+			      srcStageMask = { .TRANSFER },
+			      dstStageMask = { .FRAGMENT_SHADER },
+			      dependencyFlags = {},
+			      memoryBarrierCount = 0,
+			      pMemoryBarriers = nil,
+			      bufferMemoryBarrierCount = 0,
+			      pBufferMemoryBarriers = nil,
+			      imageMemoryBarrierCount = 1,
+			      pImageMemoryBarriers = &barrier)
+
+	submit_single_time_commands(command_buffer, queue, device, command_pool)
+
+	ok = true
+	return
 }

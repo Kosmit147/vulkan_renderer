@@ -103,6 +103,7 @@ Renderer :: struct {
 	depth_image_memory: vk.DeviceMemory,
 	depth_image_view: vk.ImageView,
 
+	texture_image_mip_levels: u32,
 	texture_image: vk.Image,
 	texture_image_memory: vk.DeviceMemory,
 	texture_image_view: vk.ImageView,
@@ -479,6 +480,7 @@ init_renderer_swap_chain :: proc(renderer: ^Renderer) -> (ok := false) {
 		image_view := create_image_view(renderer.device,
 						image,
 						renderer.swap_chain_image_format,
+						1,
 						{ .COLOR }) or_return
 		append(&renderer.swap_chain_image_views, image_view)
 	}
@@ -792,6 +794,8 @@ init_renderer_texture_image :: proc(renderer: ^Renderer) -> (ok := false) {
 	if pixels == nil do return
 	defer stbi.image_free(pixels)
 
+	renderer.texture_image_mip_levels = cast(u32)math.floor(math.log2(cast(f32)max(width, height))) + 1
+
 	image_size := int(width * height * DESIRED_CHANNELS)
 	staging_buffer, staging_buffer_memory := create_buffer(renderer.device,
 							       renderer.physical_device,
@@ -814,9 +818,10 @@ init_renderer_texture_image :: proc(renderer: ^Renderer) -> (ok := false) {
 		     							     physical_device = renderer.physical_device,
 		     							     width = u32(width),
 		     							     height = u32(height),
+									     mip_levels = renderer.texture_image_mip_levels,
 		     							     format = .R8G8B8A8_SRGB,
 		     							     tiling = .OPTIMAL,
-		     							     usage = { .TRANSFER_DST, .SAMPLED },
+		     							     usage = { .TRANSFER_SRC, .TRANSFER_DST, .SAMPLED },
 		     							     memory_properties = { .DEVICE_LOCAL }) or_return
 	defer if !ok do destroy_image(renderer.device, renderer.texture_image, renderer.texture_image_memory)
 
@@ -825,6 +830,7 @@ init_renderer_texture_image :: proc(renderer: ^Renderer) -> (ok := false) {
 				queue = renderer.graphics_queue,
 				image = renderer.texture_image,
 				format = .R8G8B8_SRGB,
+				mip_levels = renderer.texture_image_mip_levels,
 				old_layout = .UNDEFINED,
 				new_layout = .TRANSFER_DST_OPTIMAL)
 	copy_buffer_to_image(device = renderer.device,
@@ -834,13 +840,17 @@ init_renderer_texture_image :: proc(renderer: ^Renderer) -> (ok := false) {
 			     image = renderer.texture_image,
 			     width = u32(width),
 			     height = u32(height))
-	transition_image_layout(device = renderer.device,
-				command_pool = renderer.command_pool,
-				queue = renderer.graphics_queue,
-				image = renderer.texture_image,
-				format = .R8G8B8_SRGB,
-				old_layout = .TRANSFER_DST_OPTIMAL,
-				new_layout = .SHADER_READ_ONLY_OPTIMAL)
+	if !generate_mipmaps(renderer.device,
+			     renderer.physical_device,
+			     renderer.command_pool,
+			     renderer.graphics_queue,
+			     renderer.texture_image,
+			     .R8G8B8A8_SRGB,
+			     u32(width),
+			     u32(height),
+			     renderer.texture_image_mip_levels) {
+		return
+	}
 
 	ok = true
 	return
@@ -856,6 +866,7 @@ init_renderer_texture_image_view :: proc(renderer: ^Renderer) -> (ok := false) {
 	renderer.texture_image_view = create_image_view(renderer.device,
 							renderer.texture_image,
 							.R8G8B8A8_SRGB,
+							renderer.texture_image_mip_levels,
 							{ .COLOR }) or_return
 	ok = true
 	return
@@ -884,7 +895,7 @@ init_renderer_texture_sampler :: proc(renderer: ^Renderer) -> (ok := false) {
 		mipmapMode = .LINEAR,
 		mipLodBias = 0,
 		minLod = 0,
-		maxLod = 0,
+		maxLod = vk.LOD_CLAMP_NONE,
 	}
 
 	if vk.CreateSampler(renderer.device, &sampler_create_info, nil, &renderer.texture_sampler) != .SUCCESS do return
@@ -1258,6 +1269,7 @@ init_renderer_depth_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 									 renderer.physical_device,
 									 renderer.swap_chain_extent.width,
 									 renderer.swap_chain_extent.height,
+									 1,
 									 depth_format,
 									 .OPTIMAL,
 									 { .DEPTH_STENCIL_ATTACHMENT },
@@ -1267,6 +1279,7 @@ init_renderer_depth_buffer :: proc(renderer: ^Renderer) -> (ok := false) {
 	renderer.depth_image_view = create_image_view(renderer.device,
 						      renderer.depth_image,
 						      depth_format,
+						      1,
 						      { .DEPTH }) or_return
 	defer if !ok do destroy_image_view(renderer.device, renderer.depth_image_view)
 
